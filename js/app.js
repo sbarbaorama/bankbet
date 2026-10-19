@@ -1,0 +1,1021 @@
+import * as store from './store.js';
+import * as sync from './sync.js';
+import * as C from './calc.js';
+import { lineChart, barChart } from './chart.js';
+
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const view = $('#view');
+const dialog = $('#dialog');
+const dlgForm = $('#dialogForm');
+
+// ---------- Utility ----------
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = (v) => {
+  const n = parseFloat(String(v ?? '').replace(/\s/g, '').replace(',', '.'));
+  return Number.isFinite(n) ? n : NaN;
+};
+const nf2 = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = (x) => nf2.format(x || 0);
+const money = (x) => `${fmt(x)} ${store.get().settings.currency}`;
+const signed = (x) => `${x > 0 ? '+' : ''}${money(x)}`;
+const pct = (x, d = 1) => `${(x * 100).toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d })}%`;
+const cls = (x) => (x > 0.004 ? 'pos' : x < -0.004 ? 'neg' : '');
+const isoDate = (d = new Date()) => {
+  const z = new Date(d.getTime() - d.getTimezoneOffset() * 6e4);
+  return z.toISOString().slice(0, 10);
+};
+const today = () => isoDate();
+const daysAgo = (n) => isoDate(new Date(Date.now() - n * 864e5));
+const fmtDate = (s) => {
+  if (!s) return '';
+  const [y, m, d] = s.split('-');
+  return `${d}/${m}/${y}`;
+};
+const dateHead = (s) => new Date(s + 'T12:00').toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// ---------- Derivati ----------
+function balances() {
+  const d = store.get();
+  const tx = d.transactions.reduce((a, t) => a + (t.type === 'withdrawal' ? -t.amount : +t.amount), 0);
+  const profit = d.bets.reduce((a, b) => a + C.betProfit(b), 0);
+  const pendingStake = d.bets.filter((b) => !C.isSettled(b)).reduce((a, b) => a + (+b.stake || 0), 0);
+  const balance = tx + profit;
+  return { balance, available: balance - pendingStake, pendingStake, deposited: tx, profit };
+}
+
+function lossSince(fromDate) {
+  const p = store.get().bets
+    .filter((b) => C.isSettled(b) && (b.settledDate || b.date) >= fromDate)
+    .reduce((a, b) => a + C.betProfit(b), 0);
+  return p < 0 ? -p : 0;
+}
+
+function stopLossAlerts() {
+  const s = store.get().settings;
+  const out = [];
+  const day = lossSince(today());
+  const week = lossSince(daysAgo(6));
+  if (s.dailyStopLoss > 0 && day >= s.dailyStopLoss) out.push(`Stop-loss giornaliero raggiunto: perdita oggi ${money(day)} (limite ${money(s.dailyStopLoss)}). Fermati per oggi.`);
+  else if (s.dailyStopLoss > 0 && day >= s.dailyStopLoss * 0.75) out.push(`Attenzione: perdita oggi ${money(day)}, vicina al limite di ${money(s.dailyStopLoss)}.`);
+  if (s.weeklyStopLoss > 0 && week >= s.weeklyStopLoss) out.push(`Stop-loss settimanale raggiunto: perdita ultimi 7 giorni ${money(week)} (limite ${money(s.weeklyStopLoss)}).`);
+  return out;
+}
+
+function masanielloInfo(m) {
+  const linked = store.get().bets
+    .filter((b) => b.masanielloId === m.id)
+    .sort((a, b) => ((a.settledDate || a.date) + (a.createdAt || 0) < (b.settledDate || b.date) + (b.createdAt || 0) ? -1 : 1));
+  const state = C.masanielloState(m, linked);
+  if (state && m.closed && state.status === 'active') state.status = 'closed';
+  return { state, linked };
+}
+
+const MSTATUS = { active: 'Attivo', won: 'Completato ✓', lost: 'Fallito', closed: 'Chiuso' };
+
+function suggestStake(v) {
+  const d = store.get();
+  const s = d.settings;
+  const { available } = balances();
+  const odds = num(v.odds);
+  if (v.strategy === 'flat') {
+    return { amount: (available * s.flatPct) / 100, text: `Flat ${s.flatPct}% del disponibile` };
+  }
+  if (v.strategy === 'kelly') {
+    const p = num(v.prob) / 100;
+    if (!(odds > 1) || !(p > 0)) return { amount: null, text: 'Inserisci quota e probabilità stimata' };
+    const k = C.kelly(p, odds, s.kellyFraction, s.kellyCap);
+    if (k.full <= 0) return { amount: 0, text: `Nessun valore (EV ${pct(k.edge)}): Kelly consiglia di non giocare` };
+    return { amount: (available * k.pct) / 100, text: `Kelly ×${s.kellyFraction}: ${k.pct.toFixed(2)}% del disponibile${k.capped ? ' (limitato dal tetto)' : ''}` };
+  }
+  if (v.strategy === 'masaniello') {
+    const m = d.masaniello.find((x) => x.id === v.masanielloId);
+    if (!m) return { amount: null, text: 'Seleziona un Masaniello' };
+    const { state } = masanielloInfo(m);
+    if (!state || state.status !== 'active') return { amount: 0, text: `Masaniello ${MSTATUS[state?.status] || ''}` };
+    const amt = C.masanielloStake(state, odds);
+    return { amount: amt, text: `Masaniello evento ${state.i + 1}/${state.plan.N} (${state.w}/${state.plan.K} vinte) a quota ${odds > 1 ? odds : state.plan.q}` };
+  }
+  return { amount: null, text: '' };
+}
+
+// ---------- Router ----------
+const ui = {
+  betFilter: { q: '', status: '', sport: '', period: '' },
+  betLimit: 100,
+  toolTab: 'kelly',
+  statGroup: 'sport',
+  openMasaniello: null,
+};
+
+const views = { home: renderHome, bets: renderBets, tools: renderTools, stats: renderStats, bankroll: renderBankroll };
+
+function current() {
+  const v = location.hash.slice(1);
+  return views[v] ? v : 'home';
+}
+
+function render() {
+  const name = current();
+  for (const a of $$('#tabs a')) a.classList.toggle('active', a.dataset.view === name);
+  const scroll = window.scrollY;
+  const focusId = document.activeElement?.id;
+  views[name]();
+  renderTop();
+  if (focusId && document.getElementById(focusId)) {
+    const el = document.getElementById(focusId);
+    el.focus();
+    if (el.setSelectionRange && el.type === 'text') el.setSelectionRange(el.value.length, el.value.length);
+  }
+  window.scrollTo(0, scroll);
+}
+
+function renderTop() {
+  const b = balances();
+  $('#topBalance').innerHTML = `${money(b.balance)}<small>disponibile ${money(b.available)}</small>`;
+}
+
+window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+
+// ---------- HOME ----------
+function renderHome() {
+  const d = store.get();
+  if (!d.transactions.length && !d.bets.length) {
+    view.innerHTML = `
+      <div class="card stack" style="max-width:520px;margin:24px auto">
+        <h2>Benvenuto in BankBet 👋</h2>
+        <p class="muted" style="margin:0">Per iniziare imposta il bankroll iniziale: è la cifra che dedichi alle scommesse, separata dal resto delle tue finanze.</p>
+        <label class="field">Bankroll iniziale (${esc(d.settings.currency)})
+          <input id="initBank" inputmode="decimal" placeholder="es. 500">
+        </label>
+        <button class="btn primary" data-action="init-bank">Inizia</button>
+        <p class="hint" style="margin:0">Hai già dei dati su un altro dispositivo? Vai su <a href="#bankroll">Bankroll → Sincronizzazione</a> o importa un backup.</p>
+      </div>`;
+    return;
+  }
+  const b = balances();
+  const sum = C.summarize(d.bets);
+  const { points, maxDrawdown } = C.bankrollSeries(d.bets, d.transactions);
+  const st = C.streaks(d.bets);
+  const alerts = stopLossAlerts();
+  const pending = d.bets.filter((x) => !C.isSettled(x)).sort((a, z) => (a.date < z.date ? -1 : 1));
+  const activeM = d.masaniello.map((m) => ({ m, ...masanielloInfo(m) })).filter((x) => x.state?.status === 'active');
+  const roi = b.deposited > 0 ? b.profit / b.deposited : 0;
+
+  view.innerHTML = `
+    <div class="stack">
+      ${alerts.map((a) => `<div class="alert danger">${esc(a)}</div>`).join('')}
+      <div class="kpis">
+        ${kpi('Bankroll', money(b.balance), `disponibile ${money(b.available)}`)}
+        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, `ROI sul depositato ${pct(roi)}`)}
+        ${kpi('Yield', `<span class="${cls(sum.yield)}">${pct(sum.yield)}</span>`, `su ${money(sum.staked)} giocati`)}
+        ${kpi('Win rate', pct(sum.winRate), `${sum.settled} chiuse · quota media ${sum.avgOdds ? sum.avgOdds.toFixed(2) : '—'}`)}
+        ${kpi('In corso', `${sum.pending}`, `${money(sum.pendingStake)} in gioco`)}
+        ${kpi('Max drawdown', `<span class="${maxDrawdown > 0 ? 'neg' : ''}">${money(maxDrawdown)}</span>`, `serie attuale ${st.current}`)}
+      </div>
+      <div class="grid grid-2">
+        <div class="card"><h3>Andamento bankroll</h3><canvas class="chart" id="chBank"></canvas></div>
+        <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="spread"><h3>Scommesse in corso (${pending.length})</h3><a href="#bets" class="btn small ghost">Tutte</a></div>
+          ${pending.length ? `<div class="bet-list">${pending.slice(0, 8).map(betItem).join('')}</div>` : '<div class="empty">Nessuna scommessa in corso</div>'}
+        </div>
+        <div class="card">
+          <div class="spread"><h3>Masaniello attivi</h3><a href="#tools" data-action="tool-tab" data-tab="masaniello" class="btn small ghost">Gestisci</a></div>
+          ${activeM.length ? activeM.map(({ m, state }) => `
+            <div class="stack" style="gap:6px;margin-bottom:14px">
+              <div class="spread"><strong>${esc(m.name)}</strong><span class="num">${money(state.capital)}</span></div>
+              <div class="progress"><div style="width:${(state.w / state.plan.K) * 100}%"></div></div>
+              <div class="spread hint"><span>${state.w}/${state.plan.K} vinte · ${state.losses}/${state.plan.N - state.plan.K} errori concessi</span>
+              <span>Prossima: <strong>${money(C.masanielloStake(state))}</strong> @${state.plan.q}</span></div>
+            </div>`).join('') : '<div class="empty">Nessun Masaniello attivo</div>'}
+        </div>
+      </div>
+    </div>`;
+
+  lineChart($('#chBank'), points.map((p) => ({ value: p.value, label: fmtDate(p.date) })), { emptyText: 'Servono almeno due movimenti' });
+  const months = new Map();
+  for (const x of d.bets.filter(C.isSettled)) {
+    const k = (x.settledDate || x.date).slice(0, 7);
+    months.set(k, (months.get(k) || 0) + C.betProfit(x));
+  }
+  const bars = [...months.entries()].sort().slice(-12).map(([k, v]) => ({ label: k.slice(5) + '/' + k.slice(2, 4), value: v }));
+  barChart($('#chMonth'), bars, { emptyText: 'Nessuna scommessa chiusa' });
+}
+
+function kpi(label, value, sub) {
+  return `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+}
+
+function betItem(b) {
+  const p = C.betProfit(b);
+  const meta = [b.sport, [b.market, b.selection].filter(Boolean).join(': '), b.bookmaker].filter(Boolean).join(' · ');
+  return `
+    <div class="bet" data-action="edit-bet" data-id="${b.id}">
+      <div style="min-width:0">
+        <div class="title">${esc(b.event || b.selection || 'Scommessa')}</div>
+        <div class="meta">${fmtDate(b.date)}${meta ? ' · ' + esc(meta) : ''}</div>
+      </div>
+      <div class="amount">
+        <div>${C.isSettled(b) ? `<span class="${cls(p)}">${signed(p)}</span>` : money(b.stake)}</div>
+        <div class="meta">@${(+b.odds).toFixed(2)} · <span class="chip ${b.status}">${C.STATUSES[b.status]}</span></div>
+      </div>
+      ${!C.isSettled(b) ? `<div class="quick">
+        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="won">✓ Vinta</button>
+        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="lost">✗ Persa</button>
+        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="void">↺ Rimborsata</button>
+      </div>` : ''}
+    </div>`;
+}
+
+// ---------- SCOMMESSE ----------
+function filteredBets() {
+  const f = ui.betFilter;
+  const q = f.q.trim().toLowerCase();
+  let from = '';
+  if (f.period === '7') from = daysAgo(6);
+  if (f.period === '30') from = daysAgo(29);
+  if (f.period === 'month') from = today().slice(0, 8) + '01';
+  if (f.period === 'year') from = today().slice(0, 5) + '01-01';
+  return store.get().bets
+    .filter((b) => !f.status || (f.status === 'settled' ? C.isSettled(b) : b.status === f.status))
+    .filter((b) => !f.sport || b.sport === f.sport)
+    .filter((b) => !from || b.date >= from)
+    .filter((b) => !q || [b.event, b.selection, b.market, b.competition, b.bookmaker, b.tags, b.notes, b.sport]
+      .join(' ').toLowerCase().includes(q))
+    .sort((a, b) => (a.date === b.date ? (b.createdAt || 0) - (a.createdAt || 0) : a.date < b.date ? 1 : -1));
+}
+
+function distinct(field) {
+  return [...new Set(store.get().bets.map((b) => b[field]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function renderBets() {
+  const f = ui.betFilter;
+  const list = filteredBets();
+  const s = C.summarize(list);
+  const shown = list.slice(0, ui.betLimit);
+  let lastDate = '';
+  const items = shown.map((b) => {
+    const head = b.date !== lastDate ? `<div class="date-head">${esc(dateHead(b.date))}</div>` : '';
+    lastDate = b.date;
+    return head + betItem(b);
+  }).join('');
+  view.innerHTML = `
+    <div class="stack">
+      <div class="spread"><h2>Scommesse</h2>
+        <div class="row"><button class="btn small" data-action="export-csv">Esporta CSV</button>
+        <button class="btn small primary" data-action="new-bet">+ Nuova</button></div></div>
+      <div class="filters">
+        <input class="search" id="fQ" type="text" placeholder="Cerca evento, selezione, tag…" value="${esc(f.q)}">
+        <select id="fStatus">
+          <option value="">Tutti gli esiti</option>
+          <option value="pending" ${f.status === 'pending' ? 'selected' : ''}>In corso</option>
+          <option value="settled" ${f.status === 'settled' ? 'selected' : ''}>Chiuse</option>
+          ${Object.entries(C.STATUSES).filter(([k]) => k !== 'pending').map(([k, v]) => `<option value="${k}" ${f.status === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+        <select id="fSport"><option value="">Tutti gli sport</option>${distinct('sport').map((x) => `<option ${f.sport === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+        <select id="fPeriod">
+          ${[['', 'Sempre'], ['7', 'Ultimi 7 giorni'], ['30', 'Ultimi 30 giorni'], ['month', 'Questo mese'], ['year', "Quest'anno"]]
+            .map(([k, v]) => `<option value="${k}" ${f.period === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+      </div>
+      <div class="card row" style="justify-content:space-around;text-align:center;padding:10px">
+        <div><div class="hint">Scommesse</div><strong>${s.count}</strong></div>
+        <div><div class="hint">Giocato</div><strong class="num">${money(s.staked)}</strong></div>
+        <div><div class="hint">Profitto</div><strong class="num ${cls(s.profit)}">${signed(s.profit)}</strong></div>
+        <div><div class="hint">Yield</div><strong class="num ${cls(s.yield)}">${pct(s.yield)}</strong></div>
+      </div>
+      ${list.length ? `<div class="bet-list">${items}</div>` : '<div class="empty">Nessuna scommessa. Tocca + per aggiungerne una.</div>'}
+      ${list.length > shown.length ? `<button class="btn" data-action="more-bets">Mostra altre (${list.length - shown.length})</button>` : ''}
+    </div>`;
+  const bind = (id, key) => $(id).addEventListener(id === '#fQ' ? 'input' : 'change', (e) => {
+    ui.betFilter[key] = e.target.value;
+    ui.betLimit = 100;
+    render();
+  });
+  bind('#fQ', 'q'); bind('#fStatus', 'status'); bind('#fSport', 'sport'); bind('#fPeriod', 'period');
+}
+
+function exportCSV() {
+  const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Cashout', 'Profitto', 'Strategia', 'Prob. stimata %', 'Tag', 'Note']];
+  const n = (x) => (x === '' || x == null || Number.isNaN(+x) ? '' : String(+x).replace('.', ','));
+  for (const b of filteredBets()) {
+    rows.push([b.date, b.settledDate || '', b.sport, b.competition, b.event, b.market, b.selection, b.bookmaker,
+      n(b.odds), n(b.closingOdds), n(b.stake), C.STATUSES[b.status], n(b.payout), n(C.round2(C.betProfit(b))), b.strategy, n(b.prob), b.tags, b.notes]);
+  }
+  const csv = rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\r\n');
+  download(`bankbet-scommesse-${today()}.csv`, '﻿' + csv, 'text/csv');
+}
+
+// ---------- Dialog scommessa ----------
+let dlgSubmit = null;
+
+function openDialog(title, body, foot, onSubmit) {
+  dlgForm.innerHTML = `
+    <div class="dlg-head"><h2>${title}</h2><button type="button" class="icon-btn" data-close aria-label="Chiudi">✕</button></div>
+    <div class="dlg-body">${body}</div>
+    <div class="dlg-foot">${foot}</div>`;
+  dlgSubmit = onSubmit;
+  dialog.showModal();
+}
+
+dlgForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (dlgSubmit && dlgSubmit(e.submitter?.value || 'save') !== false) dialog.close();
+});
+dlgForm.addEventListener('click', (e) => {
+  if (e.target.closest('[data-close]')) dialog.close();
+});
+dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
+
+function datalist(id, field) {
+  return `<datalist id="${id}">${distinct(field).map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`;
+}
+
+function openBet(id, preset = {}) {
+  const d = store.get();
+  const existing = id ? d.bets.find((b) => b.id === id) : null;
+  const b = existing || {
+    date: today(), status: 'pending', strategy: d.settings.lastStrategy || 'flat', bookmaker: d.settings.lastBookmaker || '', ...preset,
+  };
+  const activeM = d.masaniello.filter((m) => masanielloInfo(m).state?.status === 'active' || m.id === b.masanielloId);
+  const v = (k) => esc(b[k] ?? '');
+  const body = `
+    <div class="form-grid three">
+      <label class="field">Data<input type="date" name="date" value="${v('date')}" required></label>
+      <label class="field">Sport<input name="sport" list="dlSport" value="${v('sport')}" placeholder="Calcio"></label>
+      <label class="field">Competizione<input name="competition" list="dlComp" value="${v('competition')}" placeholder="Serie A"></label>
+      <label class="field full">Evento<input name="event" value="${v('event')}" placeholder="Inter – Milan" autocomplete="off"></label>
+      <label class="field">Mercato<input name="market" list="dlMarket" value="${v('market')}" placeholder="1X2"></label>
+      <label class="field">Selezione<input name="selection" value="${v('selection')}" placeholder="1"></label>
+      <label class="field">Bookmaker<input name="bookmaker" list="dlBook" value="${v('bookmaker')}"></label>
+      <label class="field">Quota<input name="odds" inputmode="decimal" value="${v('odds')}" required placeholder="1,85"></label>
+      <label class="field">Prob. stimata %<input name="prob" inputmode="decimal" value="${v('prob')}" placeholder="opz."></label>
+      <label class="field">Quota chiusura<input name="closingOdds" inputmode="decimal" value="${v('closingOdds')}" placeholder="opz. (CLV)"></label>
+    </div>
+    <div class="form-grid">
+      <label class="field">Strategia
+        <select name="strategy">
+          ${[['flat', 'Flat (% fissa)'], ['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['manual', 'Manuale']]
+            .map(([k, l]) => `<option value="${k}" ${b.strategy === k ? 'selected' : ''}>${l}</option>`).join('')}
+        </select></label>
+      <label class="field" id="mSel">Masaniello
+        <select name="masanielloId"><option value="">—</option>
+          ${activeM.map((m) => `<option value="${m.id}" ${b.masanielloId === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
+        </select></label>
+    </div>
+    <div class="suggest" id="suggest"></div>
+    <div id="evLine" class="hint"></div>
+    <div class="form-grid three">
+      <label class="field">Puntata (${esc(d.settings.currency)})<input name="stake" inputmode="decimal" value="${v('stake')}" required></label>
+      <label class="field">Esito
+        <select name="status">${Object.entries(C.STATUSES).map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field" id="payoutF">Incasso cashout<input name="payout" inputmode="decimal" value="${v('payout')}"></label>
+      <label class="field" id="settledF">Data esito<input type="date" name="settledDate" value="${v('settledDate')}"></label>
+    </div>
+    <div id="retLine" class="hint"></div>
+    <div class="form-grid">
+      <label class="field full">Tag<input name="tags" value="${v('tags')}" placeholder="es. live, multipla, tipster X"></label>
+      <label class="field full">Note<textarea name="notes">${v('notes')}</textarea></label>
+    </div>
+    ${datalist('dlSport', 'sport')}${datalist('dlComp', 'competition')}${datalist('dlMarket', 'market')}${datalist('dlBook', 'bookmaker')}`;
+  const foot = `
+    ${existing ? `<button type="submit" value="delete" class="btn danger left" formnovalidate>Elimina</button>
+      <button type="submit" value="dup" class="btn">Duplica</button>` : ''}
+    <button type="button" class="btn" data-close>Annulla</button>
+    <button type="submit" value="save" class="btn primary">Salva</button>`;
+
+  openDialog(existing ? 'Modifica scommessa' : 'Nuova scommessa', body, foot, (action) => {
+    const fd = Object.fromEntries(new FormData(dlgForm));
+    if (action === 'delete') {
+      if (!confirm('Eliminare questa scommessa?')) return false;
+      store.remove('bets', existing.id);
+      toast('Scommessa eliminata');
+      return;
+    }
+    const odds = num(fd.odds), stake = num(fd.stake);
+    if (!(odds > 1)) { alert('Inserisci una quota valida (> 1)'); return false; }
+    if (!(stake > 0)) { alert('Inserisci una puntata valida'); return false; }
+    if (fd.strategy === 'masaniello' && !fd.masanielloId) { alert('Seleziona il Masaniello a cui collegare la scommessa'); return false; }
+    const item = {
+      ...(existing || {}),
+      date: fd.date || today(), sport: fd.sport.trim(), competition: fd.competition.trim(), event: fd.event.trim(),
+      market: fd.market.trim(), selection: fd.selection.trim(), bookmaker: fd.bookmaker.trim(),
+      odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: num(fd.closingOdds) || '',
+      strategy: fd.strategy, masanielloId: fd.strategy === 'masaniello' ? fd.masanielloId : '',
+      status: fd.status, payout: fd.status === 'cashout' ? num(fd.payout) || 0 : '',
+      settledDate: fd.status === 'pending' ? '' : fd.settledDate || today(),
+      tags: fd.tags.trim(), notes: fd.notes.trim(),
+    };
+    if (action === 'dup') {
+      delete item.id; delete item.createdAt;
+      Object.assign(item, { status: 'pending', settledDate: '', payout: '', closingOdds: '', date: today() });
+    }
+    store.upsert('bets', item);
+    // Il Masaniello si sceglie dalla sua scheda: non diventa la strategia predefinita.
+    const lastStrategy = item.strategy === 'masaniello' ? d.settings.lastStrategy : item.strategy;
+    if (d.settings.lastStrategy !== lastStrategy || d.settings.lastBookmaker !== item.bookmaker) {
+      store.updateSettings({ lastStrategy, lastBookmaker: item.bookmaker });
+    }
+    toast(action === 'dup' ? 'Scommessa duplicata' : 'Scommessa salvata');
+  });
+
+  const f = dlgForm;
+  const update = () => {
+    const fd = Object.fromEntries(new FormData(f));
+    $('#mSel').style.display = fd.strategy === 'masaniello' ? '' : 'none';
+    $('#payoutF').style.display = fd.status === 'cashout' ? '' : 'none';
+    $('#settledF').style.display = fd.status === 'pending' ? 'none' : '';
+    const sg = suggestStake(fd);
+    lastSuggest = sg.amount;
+    const box = $('#suggest');
+    if (fd.strategy === 'manual' || !sg.text) box.style.display = 'none';
+    else {
+      box.style.display = '';
+      const html = `<span>${esc(sg.text)}${sg.amount != null ? `: <strong>${money(sg.amount)}</strong>` : ''}</span>
+        ${sg.amount > 0 ? `<button type="button" class="btn small" data-use-suggest>Usa</button>` : ''}`;
+      // Non ridisegnare se invariato: altrimenti il click su "Usa" si perde dopo il blur di un campo.
+      if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+    }
+    const odds = num(fd.odds), p = num(fd.prob) / 100, stake = num(fd.stake);
+    $('#evLine').textContent = odds > 1
+      ? `Prob. implicita ${pct(1 / odds)}${p > 0 ? ` · EV ${pct(p * odds - 1)} ${p * odds > 1 ? '✓ value bet' : '✗ senza valore'}` : ''}`
+      : '';
+    $('#retLine').textContent = odds > 1 && stake > 0 ? `Vincita potenziale ${money(stake * odds)} (netto ${signed(stake * (odds - 1))})` : '';
+  };
+  let lastSuggest = null;
+  $('#suggest').addEventListener('click', (e) => {
+    if (!e.target.closest('[data-use-suggest]') || !(lastSuggest > 0)) return;
+    f.stake.value = String(C.round2(lastSuggest)).replace('.', ',');
+    update();
+  });
+  f.addEventListener('input', update);
+  f.addEventListener('change', update);
+  update();
+  if (!existing) setTimeout(() => f.event.focus(), 50);
+}
+
+// ---------- STRUMENTI ----------
+function renderTools() {
+  const tabs = [['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['value', 'Valore e margine'], ['surebet', 'Surebet']];
+  view.innerHTML = `
+    <div class="stack">
+      <h2>Strumenti</h2>
+      <div class="sub-tabs">${tabs.map(([k, l]) => `<button class="btn small ${ui.toolTab === k ? 'primary' : ''}" data-action="tool-tab" data-tab="${k}">${l}</button>`).join('')}</div>
+      <div id="toolBody"></div>
+    </div>`;
+  ({ kelly: toolKelly, masaniello: toolMasaniello, value: toolValue, surebet: toolSurebet })[ui.toolTab]($('#toolBody'));
+}
+
+function toolKelly(el) {
+  const s = store.get().settings;
+  const { available } = balances();
+  el.innerHTML = `
+    <div class="grid grid-2">
+      <div class="card stack">
+        <h3>Criterio di Kelly</h3>
+        <div class="form-grid">
+          <label class="field">Probabilità stimata %<input id="kP" inputmode="decimal" placeholder="55"></label>
+          <label class="field">Quota<input id="kO" inputmode="decimal" placeholder="2,00"></label>
+          <label class="field">Bankroll<input id="kB" inputmode="decimal" value="${String(C.round2(available)).replace('.', ',')}"></label>
+          <label class="field">Frazione
+            <select id="kF">${[[1, 'Kelly pieno'], [0.5, '½ Kelly'], [0.25, '¼ Kelly'], [0.1, '1/10 Kelly']].map(([v, l]) => `<option value="${v}" ${+s.kellyFraction === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="field">Tetto massimo %<input id="kC" inputmode="decimal" value="${s.kellyCap}"></label>
+        </div>
+        <div id="kOut"></div>
+      </div>
+      <div class="card stack hint">
+        <h3 style="color:var(--text)">Come funziona</h3>
+        <p style="margin:0">Kelly calcola la frazione di bankroll che massimizza la crescita nel lungo periodo: <strong>f = (b·p − q) / b</strong>, con <em>b</em> = quota − 1, <em>p</em> la tua probabilità stimata e <em>q</em> = 1 − p.</p>
+        <p style="margin:0">Se la tua stima è sbagliata, Kelly pieno è molto aggressivo: per questo si usa quasi sempre una frazione (½ o ¼) e un tetto massimo per singola puntata.</p>
+        <p style="margin:0">Kelly ha senso solo se <em>p</em> è maggiore della probabilità implicita della quota (1/quota): altrimenti la puntata consigliata è zero.</p>
+      </div>
+    </div>`;
+  const calc = () => {
+    const p = num($('#kP').value) / 100, o = num($('#kO').value), bank = num($('#kB').value);
+    const out = $('#kOut');
+    if (!(o > 1) || !(p > 0 && p < 1)) { out.innerHTML = '<div class="hint">Inserisci probabilità e quota.</div>'; return; }
+    const k = C.kelly(p, o, +$('#kF').value, num($('#kC').value) || 100);
+    const stake = bank > 0 ? (bank * k.pct) / 100 : 0;
+    out.innerHTML = `
+      <table>
+        <tr><td>Probabilità implicita</td><td>${pct(1 / o)}</td></tr>
+        <tr><td>Valore atteso (EV)</td><td class="${cls(k.edge)}">${pct(k.edge)}</td></tr>
+        <tr><td>Kelly pieno</td><td>${(Math.max(0, k.full) * 100).toFixed(2)}%</td></tr>
+        <tr><td>Puntata consigliata</td><td><strong>${k.pct.toFixed(2)}%${k.capped ? ' (tetto)' : ''}</strong></td></tr>
+        <tr><td>Importo</td><td><strong style="font-size:1.2rem">${money(stake)}</strong></td></tr>
+      </table>
+      ${k.full <= 0 ? '<div class="alert">Nessun valore: con questa stima Kelly consiglia di non giocare.</div>' : ''}`;
+  };
+  el.addEventListener('input', calc);
+  el.addEventListener('change', calc);
+  calc();
+}
+
+function toolMasaniello(el) {
+  const d = store.get();
+  const list = d.masaniello.map((m) => ({ m, ...masanielloInfo(m) }))
+    .sort((a, b) => (a.state?.status === 'active' ? -1 : 0) - (b.state?.status === 'active' ? -1 : 0) || (b.m.createdAt || 0) - (a.m.createdAt || 0));
+  el.innerHTML = `
+    <div class="stack">
+      <div class="spread">
+        <p class="hint" style="margin:0;max-width:640px">Il Masaniello distribuisce un capitale su <strong>N</strong> eventi puntando a vincerne almeno <strong>K</strong> a una quota media. Le puntate si ricalcolano dopo ogni esito; se gli errori superano N−K il capitale del ciclo è perso.</p>
+        <button class="btn primary" data-action="new-masaniello">+ Nuovo Masaniello</button>
+      </div>
+      ${list.length ? list.map(masanielloCard).join('') : '<div class="card empty">Nessun Masaniello. Creane uno per iniziare.</div>'}
+    </div>`;
+}
+
+function masanielloCard({ m, state, linked }) {
+  if (!state) return '';
+  const { plan } = state;
+  const open = ui.openMasaniello === m.id;
+  const next = C.masanielloStake(state);
+  const profit = state.capital - m.capital;
+  let grid = '';
+  if (open) {
+    const rows = C.masanielloGrid(plan);
+    grid = `
+      <div class="table-wrap"><table>
+        <tr><th>Vinte \\ Errori</th>${rows[0].map((_, l) => `<th>${l}</th>`).join('')}</tr>
+        ${rows.map((r, w) => `<tr><td>${w}</td>${r.map((c, l) => `<td class="${state.status === 'active' && w === state.w && l === state.losses ? 'cur' : ''}">${fmt(c.stake)}</td>`).join('')}</tr>`).join('')}
+      </table></div>
+      <div class="hint">Puntate teoriche a quota ${plan.q} per ogni combinazione vinte/errori. Se giochi a quote diverse, la puntata reale viene ricalcolata in base al capitale effettivo.</div>
+      <h3>Scommesse collegate (${linked.length})</h3>
+      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map(betItem).join('')}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
+      <div class="row">
+        ${state.status === 'active' ? `<button class="btn" data-action="m-close" data-id="${m.id}">Chiudi ciclo</button>` : ''}
+        ${m.closed ? `<button class="btn" data-action="m-reopen" data-id="${m.id}">Riapri</button>` : ''}
+        <button class="btn danger" data-action="m-delete" data-id="${m.id}">Elimina</button>
+      </div>`;
+  }
+  return `
+    <div class="card stack" style="gap:10px">
+      <div class="spread">
+        <div><strong>${esc(m.name)}</strong> <span class="chip ${state.status === 'won' ? 'won' : state.status === 'lost' ? 'lost' : state.status === 'active' ? 'pending' : 'void'}">${MSTATUS[state.status]}</span>
+        <div class="hint">${plan.N} eventi · ${plan.K} vincenti · quota ${plan.q} · capitale ${money(m.capital)} → obiettivo ${money(plan.target)} (×${plan.multiplier.toFixed(2)})</div></div>
+        <button class="btn small ghost" data-action="m-toggle" data-id="${m.id}">${open ? 'Chiudi dettagli' : 'Dettagli'}</button>
+      </div>
+      <div class="progress"><div style="width:${(Math.min(state.w, plan.K) / plan.K) * 100}%"></div></div>
+      <div class="spread">
+        <div class="hist">${state.history.map((h) => `<span class="${h}">${h === 'W' ? 'V' : h === 'L' ? 'P' : 'R'}</span>`).join('') || '<span class="hint" style="width:auto;color:var(--muted)">Nessun esito</span>'}</div>
+        <div class="num">Capitale <strong>${money(state.capital)}</strong> <span class="${cls(profit)}">(${signed(profit)})</span></div>
+      </div>
+      ${state.status === 'active' ? `<div class="suggest">
+        <span>Evento ${state.i + 1}/${plan.N} · ${state.w}/${plan.K} vinte · ${state.losses}/${plan.N - plan.K} errori${state.pending.length ? ` · ${state.pending.length} in corso` : ''}<br>
+        Prossima puntata a quota ${plan.q}: <strong>${money(next)}</strong></span>
+        <button class="btn small primary" data-action="m-bet" data-id="${m.id}">+ Scommessa</button>
+      </div>` : ''}
+      ${grid}
+    </div>`;
+}
+
+function openMasanielloForm() {
+  const { available } = balances();
+  const body = `
+    <div class="form-grid">
+      <label class="field full">Nome<input name="name" value="Masaniello ${store.get().masaniello.length + 1}" required></label>
+      <label class="field">Capitale<input name="capital" inputmode="decimal" value="${String(C.round2(Math.max(0, available * 0.1))).replace('.', ',')}" required></label>
+      <label class="field">Quota media<input name="odds" inputmode="decimal" value="1,80" required></label>
+      <label class="field">Eventi totali (N)<input name="events" inputmode="numeric" value="10" required></label>
+      <label class="field">Vincenti richiesti (K)<input name="wins" inputmode="numeric" value="6" required></label>
+    </div>
+    <div id="mPrev"></div>`;
+  const foot = `<button type="button" class="btn" data-close>Annulla</button><button type="submit" class="btn primary">Crea</button>`;
+  const read = () => {
+    const fd = Object.fromEntries(new FormData(dlgForm));
+    return { name: fd.name.trim(), capital: num(fd.capital), odds: num(fd.odds), events: parseInt(fd.events, 10), wins: parseInt(fd.wins, 10) };
+  };
+  openDialog('Nuovo Masaniello', body, foot, () => {
+    const m = read();
+    const plan = C.masanielloPlan(m);
+    if (!plan) { alert('Parametri non validi: servono capitale > 0, quota > 1 e 1 ≤ K ≤ N.'); return false; }
+    if (m.events > 60) { alert('Massimo 60 eventi.'); return false; }
+    const saved = store.upsert('masaniello', { ...m, name: m.name || 'Masaniello' });
+    ui.openMasaniello = saved.id;
+    toast('Masaniello creato');
+  });
+  const prev = () => {
+    const m = read();
+    const plan = m.events <= 60 ? C.masanielloPlan(m) : null;
+    const el = $('#mPrev');
+    if (!plan) { el.innerHTML = '<div class="hint">Parametri non validi (capitale > 0, quota > 1, 1 ≤ K ≤ N ≤ 60).</div>'; return; }
+    const first = (m.capital * (plan.f[1][1] / plan.f0) - m.capital) / (plan.q - 1);
+    el.innerHTML = `
+      <table>
+        <tr><td>Obiettivo finale</td><td><strong>${money(plan.target)}</strong></td></tr>
+        <tr><td>Profitto se riesce</td><td class="pos">${signed(plan.target - m.capital)} (×${plan.multiplier.toFixed(3)})</td></tr>
+        <tr><td>Prima puntata</td><td>${money(first)} (${pct(first / m.capital)})</td></tr>
+        <tr><td>Errori concessi</td><td>${plan.N - plan.K}</td></tr>
+        <tr><td>% vincenti richiesta</td><td>${pct(plan.K / plan.N, 0)} (implicita quota ${pct(1 / plan.q, 0)})</td></tr>
+      </table>
+      <div class="hint">Il Masaniello non crea valore: il risultato atteso dipende solo da quanto la tua % di successo reale supera quella implicita nelle quote.</div>`;
+  };
+  dlgForm.addEventListener('input', prev);
+  prev();
+}
+
+function toolValue(el) {
+  el.innerHTML = `
+    <div class="grid grid-2">
+      <div class="card stack">
+        <h3>Margine del bookmaker e quote eque</h3>
+        <div class="form-grid three">
+          <label class="field">Quota 1<input class="vo" inputmode="decimal" placeholder="2,10"></label>
+          <label class="field">Quota X<input class="vo" inputmode="decimal" placeholder="3,30"></label>
+          <label class="field">Quota 2<input class="vo" inputmode="decimal" placeholder="3,60"></label>
+        </div>
+        <div class="hint">Lascia vuota la terza per mercati a due esiti.</div>
+        <div id="vOut"></div>
+      </div>
+      <div class="card stack">
+        <h3>Valore atteso di una giocata</h3>
+        <div class="form-grid">
+          <label class="field">Quota offerta<input id="eO" inputmode="decimal"></label>
+          <label class="field">Tua probabilità %<input id="eP" inputmode="decimal"></label>
+          <label class="field">Puntata<input id="eS" inputmode="decimal" value="10"></label>
+        </div>
+        <div id="eOut"></div>
+      </div>
+    </div>`;
+  const calc = () => {
+    const odds = $$('.vo', el).map((i) => num(i.value)).filter((o) => o > 1);
+    const out = $('#vOut');
+    if (odds.length >= 2) {
+      const r = C.overround(odds);
+      out.innerHTML = `<table><tr><th>Esito</th><th>Quota</th><th>Prob. equa</th><th>Quota equa</th></tr>
+        ${odds.map((o, i) => `<tr><td>${i + 1}</td><td>${o.toFixed(2)}</td><td>${pct(r.fair[i])}</td><td>${(1 / r.fair[i]).toFixed(2)}</td></tr>`).join('')}
+        <tr><td colspan="3">Margine (aggio)</td><td><strong>${pct(r.margin, 2)}</strong></td></tr></table>`;
+    } else out.innerHTML = '';
+    const o = num($('#eO').value), p = num($('#eP').value) / 100, s = num($('#eS').value);
+    const eo = $('#eOut');
+    if (o > 1 && p > 0) {
+      const ev = p * o - 1;
+      eo.innerHTML = `<table>
+        <tr><td>Prob. implicita</td><td>${pct(1 / o)}</td></tr>
+        <tr><td>Quota equa per te</td><td>${(1 / p).toFixed(2)}</td></tr>
+        <tr><td>EV %</td><td class="${cls(ev)}"><strong>${pct(ev)}</strong></td></tr>
+        ${s > 0 ? `<tr><td>EV in ${esc(store.get().settings.currency)}</td><td class="${cls(ev)}">${signed(ev * s)}</td></tr>` : ''}
+      </table>`;
+    } else eo.innerHTML = '';
+  };
+  el.addEventListener('input', calc);
+}
+
+function toolSurebet(el) {
+  el.innerHTML = `
+    <div class="card stack" style="max-width:640px">
+      <h3>Calcolatore surebet / dutching</h3>
+      <div class="form-grid three">
+        <label class="field">Quota A<input class="so" inputmode="decimal"></label>
+        <label class="field">Quota B<input class="so" inputmode="decimal"></label>
+        <label class="field">Quota C<input class="so" inputmode="decimal" placeholder="opz."></label>
+        <label class="field">Totale da puntare<input id="sT" inputmode="decimal" value="100"></label>
+      </div>
+      <div id="sOut"></div>
+      <div class="hint">Distribuisce l'importo in modo che il ritorno sia uguale qualunque sia l'esito. Se la somma delle probabilità implicite è sotto il 100% c'è un profitto garantito (arbitraggio).</div>
+    </div>`;
+  el.addEventListener('input', () => {
+    const odds = $$('.so', el).map((i) => num(i.value)).filter((o) => o > 1);
+    const tot = num($('#sT').value);
+    const out = $('#sOut');
+    if (odds.length < 2 || !(tot > 0)) { out.innerHTML = ''; return; }
+    const r = C.surebet(odds, tot);
+    out.innerHTML = `
+      <div class="${r.isArb ? 'alert' : 'hint'}" style="${r.isArb ? 'color:var(--pos);border-color:var(--pos)' : ''}">${r.isArb ? 'Surebet trovata ✓' : 'Nessun arbitraggio: il risultato è una perdita certa (dutching).'}</div>
+      <table><tr><th>Esito</th><th>Quota</th><th>Puntata</th><th>Ritorno</th></tr>
+      ${odds.map((o, i) => `<tr><td>${'ABC'[i]}</td><td>${o.toFixed(2)}</td><td><strong>${money(r.stakes[i])}</strong></td><td>${money(r.stakes[i] * o)}</td></tr>`).join('')}
+      <tr><td colspan="3">Profitto</td><td class="${cls(r.profit)}"><strong>${signed(r.profit)} (${pct(r.roi, 2)})</strong></td></tr></table>`;
+  });
+}
+
+// ---------- STATISTICHE ----------
+function renderStats() {
+  const d = store.get();
+  const bets = d.bets;
+  const s = C.summarize(bets);
+  const st = C.streaks(bets);
+  const { maxDrawdown } = C.bankrollSeries(bets, d.transactions);
+  const groups = {
+    sport: ['Sport', (b) => b.sport],
+    competition: ['Competizione', (b) => b.competition],
+    market: ['Mercato', (b) => b.market],
+    bookmaker: ['Bookmaker', (b) => b.bookmaker],
+    strategy: ['Strategia', (b) => ({ flat: 'Flat', kelly: 'Kelly', masaniello: 'Masaniello', manual: 'Manuale' }[b.strategy])],
+    odds: ['Fascia di quota', (b) => C.oddsBucket(b.odds)],
+    tag: ['Tag', null],
+    weekday: ['Giorno', (b) => new Date(b.date + 'T12:00').toLocaleDateString('it-IT', { weekday: 'long' })],
+  };
+  let rows;
+  if (ui.statGroup === 'tag') {
+    const expanded = [];
+    for (const b of bets) for (const t of String(b.tags || '').split(',').map((x) => x.trim()).filter(Boolean)) expanded.push({ ...b, _tag: t });
+    rows = C.groupBy(expanded, (b) => b._tag);
+  } else rows = C.groupBy(bets, groups[ui.statGroup][1]);
+  const withProb = bets.filter((b) => C.isSettled(b) && +b.prob > 0 && b.status !== 'void');
+  const actualProb = withProb.reduce((a, b) => a + C.betProfit(b), 0);
+
+  view.innerHTML = `
+    <div class="stack">
+      <h2>Statistiche</h2>
+      <div class="kpis">
+        ${kpi('Profitto', `<span class="${cls(s.profit)}">${signed(s.profit)}</span>`, `${s.settled} scommesse chiuse`)}
+        ${kpi('Yield', `<span class="${cls(s.yield)}">${pct(s.yield, 2)}</span>`, `giocato ${money(s.staked)}`)}
+        ${kpi('Puntata media', money(s.avgStake), `quota media ${s.avgOdds ? s.avgOdds.toFixed(2) : '—'}`)}
+        ${kpi('Serie', st.current, `max ${st.maxW} vinte · ${st.maxL} perse`)}
+        ${kpi('CLV medio', s.clv == null ? '—' : `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, s.clvN ? `su ${s.clvN} scommesse` : 'inserisci la quota di chiusura')}
+        ${kpi('Max drawdown', money(maxDrawdown), 'dal picco di profitto')}
+      </div>
+      ${withProb.length ? `<div class="card"><h3>Le tue stime funzionano?</h3>
+        <p class="hint" style="margin:0">Sulle ${withProb.length} scommesse con probabilità stimata, il profitto atteso era <strong>${signed(s.ev)}</strong>, quello reale <strong class="${cls(actualProb)}">${signed(actualProb)}</strong>.
+        Con pochi campioni la varianza domina: valuta il dato dopo almeno 200–300 scommesse. Il CLV positivo è l'indicatore più rapido di un vantaggio reale.</p></div>` : ''}
+      <div class="card">
+        <div class="sub-tabs" style="margin-bottom:12px">${Object.entries(groups).map(([k, [l]]) => `<button class="btn small ${ui.statGroup === k ? 'primary' : ''}" data-action="stat-group" data-group="${k}">${l}</button>`).join('')}</div>
+        ${rows.length ? `<div class="table-wrap"><table>
+          <tr><th>${groups[ui.statGroup][0]}</th><th>N</th><th>Giocato</th><th>Profitto</th><th>Yield</th><th>Win%</th><th>Quota m.</th></tr>
+          ${rows.map((r) => `<tr><td>${esc(r.key)}</td><td>${r.settled}</td><td>${fmt(r.staked)}</td><td class="${cls(r.profit)}">${fmt(r.profit)}</td><td class="${cls(r.yield)}">${pct(r.yield)}</td><td>${pct(r.winRate, 0)}</td><td>${r.avgOdds ? r.avgOdds.toFixed(2) : '—'}</td></tr>`).join('')}
+        </table></div>` : '<div class="empty">Nessuna scommessa chiusa</div>'}
+      </div>
+    </div>`;
+}
+
+// ---------- BANKROLL / IMPOSTAZIONI ----------
+function renderBankroll() {
+  const d = store.get();
+  const s = d.settings;
+  const b = balances();
+  const cfg = sync.getConfig();
+  const txs = d.transactions.slice().sort((a, z) => (a.date < z.date ? 1 : -1));
+  const theme = localStorage.getItem('bankbet.theme') || 'auto';
+  view.innerHTML = `
+    <div class="stack">
+      <h2>Bankroll e impostazioni</h2>
+      <div class="kpis">
+        ${kpi('Saldo', money(b.balance), `disponibile ${money(b.available)}`)}
+        ${kpi('Depositato netto', money(b.deposited), 'depositi − prelievi')}
+        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, 'dalle scommesse')}
+      </div>
+      <div class="grid grid-2">
+        <div class="card stack">
+          <h3>Movimenti</h3>
+          <div class="form-grid">
+            <label class="field">Tipo<select id="txType"><option value="deposit">Deposito</option><option value="withdrawal">Prelievo</option></select></label>
+            <label class="field">Importo<input id="txAmount" inputmode="decimal"></label>
+            <label class="field">Data<input id="txDate" type="date" value="${today()}"></label>
+            <label class="field">Nota<input id="txNote" placeholder="opz."></label>
+          </div>
+          <button class="btn primary" data-action="add-tx">Registra movimento</button>
+          ${txs.length ? `<div class="table-wrap"><table>
+            ${txs.map((t) => `<tr><td>${fmtDate(t.date)} <span class="muted">${esc(t.note || '')}</span></td>
+              <td class="${t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</td>
+              <td style="width:1%"><button class="btn small ghost" data-action="del-tx" data-id="${t.id}" aria-label="Elimina">✕</button></td></tr>`).join('')}
+          </table></div>` : ''}
+        </div>
+        <div class="card stack">
+          <h3>Gestione del rischio</h3>
+          <div class="form-grid">
+            <label class="field">Puntata flat (% bankroll)<input data-setting="flatPct" inputmode="decimal" value="${s.flatPct}"></label>
+            <label class="field">Frazione Kelly
+              <select data-setting="kellyFraction">${[[1, 'Pieno'], [0.5, '½'], [0.25, '¼'], [0.1, '1/10']].map(([v, l]) => `<option value="${v}" ${+s.kellyFraction === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+            <label class="field">Tetto Kelly (% bankroll)<input data-setting="kellyCap" inputmode="decimal" value="${s.kellyCap}"></label>
+            <label class="field">Valuta<input data-setting="currency" value="${esc(s.currency)}" maxlength="4"></label>
+            <label class="field">Stop-loss giornaliero<input data-setting="dailyStopLoss" inputmode="decimal" value="${s.dailyStopLoss || ''}" placeholder="0 = off"></label>
+            <label class="field">Stop-loss settimanale<input data-setting="weeklyStopLoss" inputmode="decimal" value="${s.weeklyStopLoss || ''}" placeholder="0 = off"></label>
+          </div>
+          <div class="hint">Le percentuali si applicano al bankroll disponibile (saldo meno le puntate in corso). Lo stop-loss mostra un avviso quando la perdita del periodo supera il limite.</div>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div class="card stack">
+          <div class="spread"><h3>Sincronizzazione GitHub</h3>${sync.isConfigured(cfg) ? '<span class="chip won">attiva</span>' : '<span class="chip void">non configurata</span>'}</div>
+          <div class="hint">I dati vengono salvati in un file JSON in un <strong>repository privato</strong>. Il token resta solo su questo dispositivo.</div>
+          <div class="form-grid">
+            <label class="field">Utente GitHub<input id="sOwner" value="${esc(cfg.owner || '')}" autocapitalize="off" autocomplete="off"></label>
+            <label class="field">Repository privato<input id="sRepo" value="${esc(cfg.repo || '')}" placeholder="bankbet-data" autocapitalize="off" autocomplete="off"></label>
+            <label class="field">File<input id="sPath" value="${esc(cfg.path)}"></label>
+            <label class="field">Branch<input id="sBranch" value="${esc(cfg.branch)}"></label>
+            <label class="field full">Token (fine-grained, Contents: read & write)<input id="sToken" type="password" value="${esc(cfg.token || '')}" autocomplete="off"></label>
+            <label class="row full" style="font-size:.9rem"><input id="sAuto" type="checkbox" style="width:auto;min-height:0" ${cfg.auto ? 'checked' : ''}> Sincronizza automaticamente</label>
+          </div>
+          <div class="row">
+            <button class="btn primary" data-action="save-sync">Salva e sincronizza</button>
+            ${sync.isConfigured(cfg) ? '<button class="btn danger" data-action="forget-sync">Scollega</button>' : ''}
+          </div>
+          <div class="hint">${cfg.lastSync ? `Ultima sincronizzazione: ${new Date(cfg.lastSync).toLocaleString('it-IT')}` : ''}
+          ${cfg.lastError ? `<br><span class="neg">Errore: ${esc(cfg.lastError)}</span>` : ''}</div>
+          <details class="hint"><summary>Come creare il token</summary>
+            <ol style="padding-left:18px">
+              <li>Crea su GitHub un repository <strong>privato</strong> vuoto (es. <code>bankbet-data</code>), con un README così ha il branch <code>main</code>.</li>
+              <li>Vai su Settings → Developer settings → Personal access tokens → <strong>Fine-grained tokens</strong> → Generate new token.</li>
+              <li>Repository access: <em>Only select repositories</em> → solo il repo dei dati.</li>
+              <li>Permissions → Repository → <strong>Contents: Read and write</strong>. Nient'altro.</li>
+              <li>Incolla il token qui, su ogni dispositivo (PC e telefono).</li>
+            </ol></details>
+        </div>
+        <div class="card stack">
+          <h3>Backup e aspetto</h3>
+          <div class="row">
+            <button class="btn" data-action="export-json">Esporta backup JSON</button>
+            <button class="btn" data-action="import-json">Importa backup</button>
+            <button class="btn" data-action="export-csv">Esporta CSV</button>
+          </div>
+          <input type="file" id="importFile" accept="application/json,.json" hidden>
+          <label class="field">Tema
+            <select id="themeSel">${[['auto', 'Automatico'], ['light', 'Chiaro'], ['dark', 'Scuro']].map(([k, l]) => `<option value="${k}" ${theme === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <div class="hint">I dati sono salvati nel browser di questo dispositivo. Senza sincronizzazione, esporta periodicamente un backup.</div>
+          <button class="btn danger" data-action="reset">Cancella tutti i dati locali</button>
+        </div>
+      </div>
+      <p class="hint" style="text-align:center">Gioca responsabilmente. Nessun metodo di staking crea un vantaggio: protegge il bankroll solo se le tue giocate hanno valore. Se il gioco smette di essere un divertimento, chiedi aiuto (Telefono Verde Nazionale per le problematiche legate al Gioco d'Azzardo: 800 558822).</p>
+    </div>`;
+
+  for (const inp of $$('[data-setting]')) {
+    inp.addEventListener('change', () => {
+      const k = inp.dataset.setting;
+      const val = k === 'currency' ? inp.value.trim() || '€' : Math.max(0, num(inp.value) || 0);
+      store.updateSettings({ [k]: val });
+      toast('Impostazione salvata');
+    });
+  }
+  $('#themeSel').addEventListener('change', (e) => { localStorage.setItem('bankbet.theme', e.target.value); applyTheme(); render(); });
+  $('#importFile').addEventListener('change', importJSON);
+}
+
+function importJSON(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  file.text().then((t) => {
+    let incoming;
+    try { incoming = JSON.parse(t); } catch { alert('File non valido'); return; }
+    if (!incoming || !Array.isArray(incoming.bets)) { alert('Il file non sembra un backup BankBet'); return; }
+    if (confirm('Unire il backup ai dati attuali?\nOK = unisci · Annulla = sostituisci tutto')) {
+      store.applyMerged(store.merge(store.get(), incoming));
+      store.updateSettings({});
+    } else if (confirm('Sostituire TUTTI i dati attuali con il backup?')) {
+      store.replaceAll(incoming);
+    } else return;
+    toast('Backup importato');
+  });
+  e.target.value = '';
+}
+
+// ---------- Azioni ----------
+const actions = {
+  'init-bank'() {
+    const v = num($('#initBank').value);
+    if (!(v > 0)) { alert('Inserisci un importo valido'); return; }
+    store.upsert('transactions', { type: 'deposit', amount: C.round2(v), date: today(), note: 'Bankroll iniziale' });
+  },
+  'new-bet'() { openBet(); },
+  'edit-bet'(el) { openBet(el.dataset.id); },
+  settle(el) {
+    const b = store.get().bets.find((x) => x.id === el.dataset.id);
+    if (!b) return;
+    store.upsert('bets', { ...b, status: el.dataset.status, settledDate: today() });
+    toast(`Esito: ${C.STATUSES[el.dataset.status]}`);
+  },
+  'more-bets'() { ui.betLimit += 100; render(); },
+  'export-csv': exportCSV,
+  'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
+  'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
+  'new-masaniello': openMasanielloForm,
+  'm-toggle'(el) { ui.openMasaniello = ui.openMasaniello === el.dataset.id ? null : el.dataset.id; render(); },
+  'm-bet'(el) { openBet(null, { strategy: 'masaniello', masanielloId: el.dataset.id }); },
+  'm-close'(el) {
+    if (!confirm('Chiudere questo ciclo Masaniello? Le scommesse collegate restano registrate.')) return;
+    const m = store.get().masaniello.find((x) => x.id === el.dataset.id);
+    store.upsert('masaniello', { ...m, closed: true });
+  },
+  'm-reopen'(el) {
+    const m = store.get().masaniello.find((x) => x.id === el.dataset.id);
+    store.upsert('masaniello', { ...m, closed: false });
+  },
+  'm-delete'(el) {
+    if (!confirm('Eliminare il Masaniello? Le scommesse collegate restano ma perdono il collegamento.')) return;
+    const id = el.dataset.id;
+    for (const b of store.get().bets.filter((x) => x.masanielloId === id)) store.upsert('bets', { ...b, masanielloId: '', strategy: 'manual' });
+    store.remove('masaniello', id);
+  },
+  'add-tx'() {
+    const amount = num($('#txAmount').value);
+    if (!(amount > 0)) { alert('Inserisci un importo valido'); return; }
+    store.upsert('transactions', { type: $('#txType').value, amount: C.round2(amount), date: $('#txDate').value || today(), note: $('#txNote').value.trim() });
+    toast('Movimento registrato');
+  },
+  'del-tx'(el) {
+    if (confirm('Eliminare il movimento?')) store.remove('transactions', el.dataset.id);
+  },
+  'save-sync'() {
+    const cfg = sync.setConfig({
+      owner: $('#sOwner').value.trim(), repo: $('#sRepo').value.trim(), path: $('#sPath').value.trim() || 'bankbet.json',
+      branch: $('#sBranch').value.trim() || 'main', token: $('#sToken').value.trim(), auto: $('#sAuto').checked,
+    });
+    if (!sync.isConfigured(cfg)) { alert('Compila utente, repository e token'); return; }
+    runSync(true);
+  },
+  'forget-sync'() {
+    if (!confirm('Rimuovere la configurazione di sincronizzazione da questo dispositivo? I dati locali restano.')) return;
+    sync.setConfig({ token: '', lastSync: null, lastError: null });
+    updateSyncBtn();
+    render();
+  },
+  'export-json'() { download(`bankbet-backup-${today()}.json`, store.exportJSON(), 'application/json'); },
+  'import-json'() { $('#importFile').click(); },
+  reset() {
+    if (!confirm('Cancellare tutti i dati su questo dispositivo? (Il file sincronizzato su GitHub non viene toccato, ma alla prossima sincronizzazione i dati verranno riscaricati.)')) return;
+    if (!confirm('Sei sicuro? L\'operazione non è reversibile senza backup.')) return;
+    store.replaceAll(store.emptyData());
+  },
+};
+
+view.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el || !actions[el.dataset.action]) return;
+  if (el.tagName === 'A' && el.dataset.action === 'tool-tab') ui.toolTab = el.dataset.tab;
+  else e.preventDefault();
+  actions[el.dataset.action](el);
+});
+dlgForm.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (el && actions[el.dataset.action]) { e.preventDefault(); actions[el.dataset.action](el); }
+});
+$('#fab').addEventListener('click', () => openBet());
+
+// ---------- Sync ----------
+const syncBtn = $('#syncBtn');
+function updateSyncBtn(state) {
+  const cfg = sync.getConfig();
+  syncBtn.hidden = !sync.isConfigured(cfg);
+  syncBtn.classList.toggle('spin', state === 'run');
+  syncBtn.classList.toggle('err', state === 'err' || (!state && !!cfg.lastError));
+  syncBtn.title = cfg.lastError ? `Errore: ${cfg.lastError}` : cfg.lastSync ? `Sincronizzato ${new Date(cfg.lastSync).toLocaleString('it-IT')}` : 'Sincronizza';
+}
+
+async function runSync(verbose = false) {
+  if (!sync.isConfigured() || !navigator.onLine) return;
+  updateSyncBtn('run');
+  try {
+    const r = await sync.sync();
+    updateSyncBtn();
+    if (verbose) toast(r.pulled || r.pushed ? 'Sincronizzato ✓' : 'Già aggiornato ✓');
+  } catch (e) {
+    updateSyncBtn('err');
+    if (verbose) alert('Sincronizzazione non riuscita: ' + e.message);
+  }
+  if (current() === 'bankroll') render();
+}
+syncBtn.addEventListener('click', () => runSync(true));
+
+let syncTimer;
+store.onChange(({ fromSync }) => {
+  if (!dialog.open || fromSync) render();
+  if (!fromSync && sync.getConfig().auto) {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => runSync(false), 2500);
+  }
+});
+dialog.addEventListener('close', () => render());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && sync.getConfig().auto) runSync(false);
+});
+window.addEventListener('online', () => sync.getConfig().auto && runSync(false));
+
+// ---------- Tema / avvio ----------
+function applyTheme() {
+  const t = localStorage.getItem('bankbet.theme');
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());
+let resizeT;
+window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (current() === 'home') render(); }, 150); });
+
+applyTheme();
+render();
+updateSyncBtn();
+if (sync.getConfig().auto) runSync(false);
+if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}

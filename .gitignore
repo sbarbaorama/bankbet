@@ -1,0 +1,4 @@
+.claude/
+*.local.json
+bankbet-backup-*.json
+*.csv
