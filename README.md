@@ -18,11 +18,20 @@ Web app (PWA) per registrare scommesse e gestire il bankroll. Funziona su PC e s
   - *Cicli progressivi*: scalata, Fibonacci, D'Alembert, Labouchère, sempre con budget, tetto alla puntata e arresto automatico;
   - *Esposizione massima*: limite opzionale alla somma delle puntate in corso.
 - **Simulatore Monte Carlo**: confronta le strategie (martingala compresa) sugli stessi esiti casuali: bankroll mediano, scenari peggiori e migliori, probabilità di chiudere in utile, rischio di rovina, drawdown.
+- **Segnali da Telegram**: i bot TotalCorner e Betwin aggiungono ai messaggi il link *Registra su BankBet*, che apre la nuova scommessa già compilata (partita, campionato, mercato, selezione, probabilità, note). In alternativa *Incolla segnale* legge il testo copiato da Telegram (anche più partite nello stesso messaggio) e, con l'app installata su Android, BankBet compare nel menu *Condividi*. La fonte resta sulla scommessa ed è analizzabile in Statistiche.
 - **Strumenti**: calcolatore Kelly, margine del bookmaker e quote eque, valore atteso (EV), surebet/dutching.
 - **Statistiche**: yield, ROI, win rate, drawdown massimo, serie, CLV e confronto tra profitto atteso e reale; profitto mensile; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
 - **Gestione del rischio**: stop-loss giornaliero e settimanale, stop-win giornaliero, obiettivo mensile.
 - **Aspetto**: tema scuro predefinito, chiaro o automatico.
 - **Dati**: salvati nel browser; backup/ripristino JSON, esportazione CSV (compatibile con Excel in italiano), sincronizzazione opzionale tra dispositivi tramite un repository GitHub privato.
+
+## Link per i segnali
+
+Qualsiasi script può aprire BankBet con una scommessa precompilata usando un link così (parametri tutti facoltativi, valori codificati per URL):
+
+```
+https://sbarbaorama.github.io/bankbet/#new?src=totalcorner&ev=Inter%20-%20Milan&comp=Serie%20A&sport=Calcio&mkt=1X2&sel=1&odds=1.85&prob=58&date=2026-10-19&tags=live&note=...&book=Snai
+```
 
 ## Dove stanno i dati
 

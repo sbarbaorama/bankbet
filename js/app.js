@@ -2,6 +2,7 @@ import * as store from './store.js';
 import * as sync from './sync.js';
 import * as C from './calc.js';
 import * as S from './staking.js';
+import * as SG from './signals.js';
 import { lineChart, barChart, multiLineChart } from './chart.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -259,7 +260,7 @@ function renderTop() {
   $('#topBalance').innerHTML = `${money(b.balance)}<small>disponibile ${money(b.available)}</small>`;
 }
 
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { if (handleIncoming()) return; render(); window.scrollTo(0, 0); });
 
 // ---------- HOME ----------
 const PERIODS = [['7', '7G', 7], ['30', '30G', 30], ['90', '3M', 90], ['365', 'Anno', 365], ['all', 'Tutto', 0]];
@@ -335,7 +336,7 @@ function renderHome() {
       <div class="home-head">
         <div><div class="when">${esc(when.charAt(0).toUpperCase() + when.slice(1))}</div><h1>${greeting()}</h1></div>
         <div class="actions">
-          <button class="btn" data-action="export-csv">Esporta CSV</button>
+          <button class="btn" data-action="paste-signal">Incolla segnale</button>
           <button class="btn primary" data-action="new-bet"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Nuova scommessa</button>
         </div>
       </div>
@@ -567,7 +568,8 @@ function renderBets() {
   view.innerHTML = `
     <div class="stack">
       <div class="spread"><h2>Schedine</h2>
-        <div class="row"><button class="btn small" data-action="export-csv">Esporta CSV</button>
+        <div class="row"><button class="btn small" data-action="paste-signal">Incolla segnale</button>
+        <button class="btn small" data-action="export-csv">Esporta CSV</button>
         <button class="btn small primary" data-action="new-bet">+ Nuova</button></div></div>
       <div class="filters">
         <input class="search" id="fQ" type="text" placeholder="Cerca evento, selezione, tag…" value="${esc(f.q)}">
@@ -626,7 +628,7 @@ function openDialog(title, body, foot, onSubmit) {
   dlgSubmit = onSubmit;
   dlgCtl.abort();
   dlgCtl = new AbortController();
-  dialog.showModal();
+  if (!dialog.open) dialog.showModal();
 }
 
 dlgForm.addEventListener('submit', (e) => {
@@ -760,7 +762,7 @@ function openBet(id, preset = {}) {
       status: fd.status, payout: fd.status === 'cashout' ? num(fd.payout) || 0 : '',
       settledDate: fd.status === 'pending' ? '' : fd.settledDate || today(),
       tags: fd.tags.trim(), notes: fd.notes.trim(),
-      freebet: !!fd.freebet, legs,
+      freebet: !!fd.freebet, legs, source: b.source || '',
     };
     if (action === 'dup') {
       delete item.id; delete item.createdAt;
@@ -838,7 +840,70 @@ function openBet(id, preset = {}) {
     if (del) { del.closest('.leg').remove(); update(); }
   });
   update();
-  if (!existing) setTimeout(() => f.event.focus(), 50);
+  if (!existing) setTimeout(() => (b.event ? f.odds : f.event).focus(), 50);
+}
+
+// ---------- Segnali dai bot (link e testo incollato) ----------
+function openSignal(preset) {
+  const d = store.get();
+  const dup = preset.event && d.bets.find((b) => b.event === preset.event && (b.market || '') === (preset.market || '')
+    && b.date >= (preset.date || today()).slice(0, 10) && !C.isSettled(b));
+  openBet(null, { strategy: d.settings.lastStrategy || 'flat', ...preset });
+  const src = SG.SOURCES[preset.source] || 'segnale';
+  toast(dup ? `Attenzione: hai già una scommessa in corso su ${preset.event}` : `Dati da ${src}: controlla quota e puntata, poi salva`);
+}
+
+function openPaste(initial = '') {
+  const body = `
+    <label class="field">Testo del messaggio
+      <textarea id="pasteText" style="min-height:160px" placeholder="Incolla qui il messaggio di Telegram (TotalCorner, Betwin o un testo con partita e quota)">${esc(initial)}</textarea></label>
+    <div id="pasteOut" class="stack" style="gap:8px"></div>`;
+  openDialog('Incolla segnale', body, '<button type="button" class="btn" data-close>Chiudi</button>', () => false);
+  let found = [];
+  const parse = () => {
+    found = SG.parseText($('#pasteText').value);
+    const out = $('#pasteOut');
+    if (!$('#pasteText').value.trim()) { out.innerHTML = '<div class="hint">In Telegram tieni premuto il messaggio → Copia, poi incollalo qui.</div>'; return; }
+    if (!found.length) { out.innerHTML = '<div class="hint">Non ho riconosciuto partita o quota in questo testo.</div>'; return; }
+    out.innerHTML = `<div class="hint">${found.length === 1 ? 'Trovato un segnale' : `Trovati ${found.length} segnali: scegli quale registrare`}</div>` +
+      found.map((p, i) => `<div class="suggest"><span><strong>${esc(p.event || 'Partita non riconosciuta')}</strong><br>
+        <span class="hint">${esc([SG.SOURCES[p.source], p.competition, [p.market, p.selection].filter(Boolean).join(': '), p.prob ? `prob. ${String(p.prob).replace('.', ',')}%` : '', p.odds ? `@${fmtOdds(p.odds)}` : '', p.date ? fmtDate(p.date) : ''].filter(Boolean).join(' · '))}</span></span>
+        <button type="button" class="btn small primary" data-use-signal="${i}">Registra</button></div>`).join('');
+  };
+  $('#pasteText').addEventListener('input', parse, dlgOn());
+  $('#pasteOut').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-use-signal]');
+    if (b) openSignal(found[+b.dataset.useSignal]);
+  }, dlgOn());
+  parse();
+  if (!initial && navigator.clipboard?.readText) {
+    navigator.clipboard.readText().then((t) => {
+      if (t && !$('#pasteText')?.value && SG.parseText(t).length) { $('#pasteText').value = t; parse(); }
+    }).catch(() => {});
+  }
+  setTimeout(() => $('#pasteText')?.focus(), 50);
+}
+
+// Link "#new?..." dai bot e testo condiviso da Android (share target): apre il modulo già compilato.
+function handleIncoming() {
+  const h = location.hash;
+  const q = new URLSearchParams(location.search);
+  if (h.startsWith('#new?')) {
+    const preset = SG.fromParams(new URLSearchParams(h.slice(5)));
+    history.replaceState(null, '', location.pathname + '#home');
+    render();
+    openSignal(preset);
+    return true;
+  }
+  const shared = [q.get('title'), q.get('text'), q.get('url')].filter(Boolean).join('\n');
+  if (shared) {
+    history.replaceState(null, '', location.pathname + (h || '#home'));
+    render();
+    const found = SG.parseText(shared);
+    if (found.length === 1) openSignal(found[0]); else openPaste(shared);
+    return true;
+  }
+  return false;
 }
 
 // ---------- STRUMENTI ----------
@@ -1310,6 +1375,7 @@ function renderStats() {
     market: ['Mercato', (b) => b.market],
     bookmaker: ['Bookmaker', (b) => b.bookmaker],
     strategy: ['Strategia', (b) => ({ flat: 'Flat', kelly: 'Kelly', units: 'Unità a fiducia', target: 'Profitto fisso', masaniello: 'Masaniello', cycle: 'Ciclo progressivo', manual: 'Manuale' }[b.strategy])],
+    source: ['Fonte', (b) => SG.SOURCES[b.source] || b.source || 'Manuale'],
     odds: ['Fascia di quota', (b) => C.oddsBucket(b.odds)],
     tag: ['Tag', null],
     weekday: ['Giorno', (b) => new Date(b.date + 'T12:00').toLocaleDateString('it-IT', { weekday: 'long' })],
@@ -1549,6 +1615,7 @@ const actions = {
     if (current() === 'bets') render(); else location.hash = 'bets';
   },
   'export-csv': exportCSV,
+  'paste-signal'() { openPaste(); },
   'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
   'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
   'new-masaniello': openMasanielloForm,
@@ -1748,7 +1815,7 @@ window.addEventListener('resize', () => {
 });
 
 applyTheme();
-render();
+if (!handleIncoming()) render();
 updateSyncBtn();
 if (sync.getConfig().auto) runSync(false);
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
