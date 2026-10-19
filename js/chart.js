@@ -272,3 +272,88 @@ export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
     }
   });
 }
+
+/**
+ * Più linee sullo stesso asse (es. confronto strategie). series: [{ name, color, points: [{ x, y }] }]
+ * opts: { fmtValue(v), fmtX(x), baseline }
+ */
+export function multiLineChart(canvas, series, opts = {}) {
+  canvas._ml = { series, opts };
+  if (!canvas._mlBound) {
+    canvas._mlBound = true;
+    const move = (e) => { const r = canvas.getBoundingClientRect(); drawMulti(canvas, e.clientX - r.left); };
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerdown', move);
+    canvas.addEventListener('pointerleave', () => drawMulti(canvas, null));
+  }
+  drawMulti(canvas, null);
+}
+
+function drawMulti(canvas, hoverX) {
+  const { series, opts } = canvas._ml;
+  const { ctx, w, h, color } = setup(canvas);
+  const tip = tipEl(canvas);
+  const all = series.flatMap((s) => s.points);
+  if (all.length < 2) { tip.hidden = true; emptyMsg(ctx, w, h, color, 'Nessun dato'); return; }
+  const pad = { l: 58, r: 12, t: 12, b: 26 };
+  const ys = all.map((p) => p.y).concat(opts.baseline != null ? [opts.baseline] : []);
+  const ticks = niceTicks(Math.min(...ys), Math.max(...ys));
+  const ymin = ticks[0], ymax = ticks[ticks.length - 1];
+  const xmin = Math.min(...all.map((p) => p.x)), xmax = Math.max(...all.map((p) => p.x)) || 1;
+  const x = (v) => pad.l + ((v - xmin) / (xmax - xmin || 1)) * (w - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - ymin) / (ymax - ymin)) * (h - pad.t - pad.b);
+  ctx.font = `11px ${FONT}`;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color('--grid');
+  ctx.fillStyle = color('--muted');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const t of ticks) {
+    const py = Math.round(y(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(w - pad.r, py); ctx.stroke();
+    ctx.fillText(fmtTick(t), pad.l - 8, py);
+  }
+  ctx.textBaseline = 'top';
+  const fx = opts.fmtX || ((v) => String(Math.round(v)));
+  ctx.textAlign = 'left'; ctx.fillText(fx(xmin), pad.l, h - pad.b + 8);
+  ctx.textAlign = 'right'; ctx.fillText(fx(xmax), w - pad.r, h - pad.b + 8);
+  if (opts.baseline != null) {
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = color('--faint');
+    const by = Math.round(y(opts.baseline)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(pad.l, by); ctx.lineTo(w - pad.r, by); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (const s of series) {
+    ctx.beginPath();
+    s.points.forEach((p, i) => (i ? ctx.lineTo(x(p.x), y(p.y)) : ctx.moveTo(x(p.x), y(p.y))));
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+  if (hoverX == null) { tip.hidden = true; return; }
+  const ref = series[0].points;
+  let best = 0, bestD = Infinity;
+  ref.forEach((p, i) => { const d = Math.abs(x(p.x) - hoverX); if (d <= bestD) { bestD = d; best = i; } });
+  const px = x(ref[best].x);
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = color('--faint');
+  ctx.beginPath(); ctx.moveTo(Math.round(px) + 0.5, pad.t); ctx.lineTo(Math.round(px) + 0.5, h - pad.b); ctx.stroke();
+  ctx.setLineDash([]);
+  const rows = [];
+  for (const s of series) {
+    const p = s.points[best];
+    if (!p) continue;
+    ctx.beginPath(); ctx.arc(px, y(p.y), 4, 0, Math.PI * 2); ctx.fillStyle = s.color; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = color('--surface'); ctx.stroke();
+    rows.push({ s, v: p.y });
+  }
+  rows.sort((a, b) => b.v - a.v);
+  const fv = opts.fmtValue || ((v) => v.toFixed(2));
+  tip.innerHTML = `<div class="d">${fx(ref[best].x)}</div>` + rows.map((r) =>
+    `<div style="display:flex;align-items:center;gap:6px;justify-content:space-between"><span style="display:inline-flex;align-items:center;gap:6px"><i style="width:10px;height:3px;border-radius:2px;background:${r.s.color};display:inline-block"></i>${r.s.name}</span><strong style="font-family:var(--font-num);font-size:1rem">${fv(r.v)}</strong></div>`).join('');
+  tip.hidden = false;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
+}

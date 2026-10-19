@@ -1,7 +1,8 @@
 import * as store from './store.js';
 import * as sync from './sync.js';
 import * as C from './calc.js';
-import { lineChart, barChart } from './chart.js';
+import * as S from './staking.js';
+import { lineChart, barChart, multiLineChart } from './chart.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -35,12 +36,22 @@ const fmtDate = (s) => {
 const dateHead = (s) => new Date(s + 'T12:00').toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, undo) {
   const t = $('#toast');
-  t.textContent = msg;
+  t.innerHTML = `<span>${esc(msg)}</span>${undo ? '<button type="button">Annulla</button>' : ''}`;
+  t.classList.toggle('act', !!undo);
+  if (undo) t.querySelector('button').onclick = () => { t.classList.remove('show', 'act'); undo(); toast('Operazione annullata'); };
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => t.classList.remove('show', 'act'), undo ? 6000 : 2600);
+}
+
+function settleBet(id, status) {
+  const b = store.get().bets.find((x) => x.id === id);
+  if (!b) return;
+  const prev = { ...b };
+  store.upsert('bets', { ...b, status, settledDate: today() });
+  toast(`Esito: ${C.STATUSES[status]}`, () => store.upsert('bets', prev));
 }
 
 function download(name, text, type) {
@@ -53,13 +64,45 @@ function download(name, text, type) {
 }
 
 // ---------- Derivati ----------
+const txDelta = (t) => (t.type === 'transfer' ? 0 : t.type === 'withdrawal' ? -t.amount : +t.amount);
+const TX_TYPES = { deposit: 'Deposito', withdrawal: 'Prelievo', bonus: 'Bonus accreditato', transfer: 'Trasferimento' };
+const NO_ACCOUNT = 'Non assegnato';
+
 function balances() {
   const d = store.get();
-  const tx = d.transactions.reduce((a, t) => a + (t.type === 'withdrawal' ? -t.amount : +t.amount), 0);
+  const tx = d.transactions.reduce((a, t) => a + txDelta(t), 0);
+  const bonus = d.transactions.filter((t) => t.type === 'bonus').reduce((a, t) => a + +t.amount, 0);
   const profit = d.bets.reduce((a, b) => a + C.betProfit(b), 0);
-  const pendingStake = d.bets.filter((b) => !C.isSettled(b)).reduce((a, b) => a + (+b.stake || 0), 0);
+  const pendingStake = d.bets.filter((b) => !C.isSettled(b)).reduce((a, b) => a + C.realStake(b), 0);
   const balance = tx + profit;
-  return { balance, available: balance - pendingStake, pendingStake, deposited: tx, profit };
+  return { balance, available: balance - pendingStake, pendingStake, deposited: tx - bonus, bonus, profit };
+}
+
+// Saldo per conto (bookmaker): movimenti, trasferimenti e scommesse con quel bookmaker.
+function accounts() {
+  const d = store.get();
+  const map = new Map();
+  const acc = (name) => {
+    const k = (name || '').trim() || NO_ACCOUNT;
+    if (!map.has(k)) map.set(k, { name: k, cash: 0, profit: 0, pending: 0, bets: 0 });
+    return map.get(k);
+  };
+  for (const t of d.transactions) {
+    if (t.type === 'transfer') { acc(t.from).cash -= +t.amount; acc(t.to).cash += +t.amount; }
+    else acc(t.bookmaker).cash += txDelta(t);
+  }
+  for (const b of d.bets) {
+    const a = acc(b.bookmaker);
+    a.bets++;
+    a.profit += C.betProfit(b);
+    if (!C.isSettled(b)) a.pending += C.realStake(b);
+  }
+  return [...map.values()].map((a) => ({ ...a, balance: a.cash + a.profit, available: a.cash + a.profit - a.pending }))
+    .sort((a, b) => (a.name === NO_ACCOUNT) - (b.name === NO_ACCOUNT) || b.balance - a.balance);
+}
+
+function usesAccounts() {
+  return store.get().transactions.some((t) => t.type === 'transfer' || (t.bookmaker || '').trim());
 }
 
 function lossSince(fromDate) {
@@ -80,6 +123,17 @@ function stopLossAlerts() {
   return out;
 }
 
+function infoAlerts() {
+  const d = store.get();
+  const s = d.settings;
+  const out = [];
+  const todayP = d.bets.filter((b) => C.isSettled(b) && (b.settledDate || b.date) === today()).reduce((a, b) => a + C.betProfit(b), 0);
+  if (s.dailyStopWin > 0 && todayP >= s.dailyStopWin) out.push(`Obiettivo di giornata raggiunto (${signed(todayP)}): è un buon momento per fermarti.`);
+  const stale = d.bets.filter((b) => !C.isSettled(b) && b.date < daysAgo(2)).length;
+  if (stale) out.push(`<span>${stale === 1 ? 'Una scommessa è' : `${stale} scommesse sono`} ancora "in corso" da più di due giorni: aggiorna l'esito.</span> <a href="#bets" data-action="show-pending">Aggiorna</a>`);
+  return out;
+}
+
 function masanielloInfo(m) {
   const linked = store.get().bets
     .filter((b) => b.masanielloId === m.id)
@@ -91,20 +145,56 @@ function masanielloInfo(m) {
 
 const MSTATUS = { active: 'Attivo', won: 'Completato ✓', lost: 'Fallito', closed: 'Chiuso' };
 
-function suggestStake(v) {
+function currentUnit() {
+  const d = store.get();
+  const { points } = C.bankrollSeries(d.bets, d.transactions);
+  return S.unitValue(d.settings, points, balances().balance, today().slice(0, 8) + '01');
+}
+
+// Limite all'esposizione totale (puntate in corso + nuova) come % del saldo.
+function exposureCap(amount, existingId) {
+  const s = store.get().settings;
+  if (!(s.maxExposurePct > 0) || !(amount > 0)) return { amount, capped: false };
+  const b = balances();
+  const own = existingId ? +(store.get().bets.find((x) => x.id === existingId && !C.isSettled(x) && !x.freebet)?.stake || 0) : 0;
+  const room = Math.max(0, (b.balance * s.maxExposurePct) / 100 - (b.pendingStake - own));
+  return amount > room ? { amount: room, capped: true } : { amount, capped: false };
+}
+
+function suggestStake(v, existingId) {
   const d = store.get();
   const s = d.settings;
   const { available } = balances();
   const odds = num(v.odds);
+  const capped = (r) => {
+    const c = exposureCap(r.amount, existingId);
+    return c.capped ? { amount: c.amount, text: `${r.text} · ridotta per l'esposizione massima (${s.maxExposurePct}% del saldo)` } : r;
+  };
   if (v.strategy === 'flat') {
-    return { amount: (available * s.flatPct) / 100, text: `Flat ${s.flatPct}% del disponibile` };
+    return capped({ amount: (available * s.flatPct) / 100, text: `Flat ${s.flatPct}% del disponibile` });
   }
   if (v.strategy === 'kelly') {
-    const p = num(v.prob) / 100;
+    let p = num(v.prob) / 100;
     if (!(odds > 1) || !(p > 0)) return { amount: null, text: 'Inserisci quota e probabilità stimata' };
+    let note = '';
+    if (s.kellyAdaptive) {
+      const r = S.estimateReliability(d.bets);
+      p = S.shrinkProb(p, odds, r.w);
+      note = ` · stima corretta a ${pct(p)} (affidabilità ${Math.round(r.w * 100)}%)`;
+    }
     const k = C.kelly(p, odds, s.kellyFraction, s.kellyCap);
-    if (k.full <= 0) return { amount: 0, text: `Nessun valore (EV ${pct(k.edge)}): Kelly consiglia di non giocare` };
-    return { amount: (available * k.pct) / 100, text: `Kelly ×${s.kellyFraction}: ${k.pct.toFixed(2)}% del disponibile${k.capped ? ' (limitato dal tetto)' : ''}` };
+    if (k.full <= 0) return { amount: 0, text: `Nessun valore (EV ${pct(k.edge)}): Kelly consiglia di non giocare${note}` };
+    return capped({ amount: (available * k.pct) / 100, text: `Kelly ${({ 1: 'pieno', 0.5: '½', 0.25: '¼', 0.1: '1/10' })[+s.kellyFraction] || '×' + s.kellyFraction}: ${pct(k.pct / 100, 2)} del disponibile${k.capped ? ' (limitato dal tetto)' : ''}${note}` });
+  }
+  if (v.strategy === 'units') {
+    const conf = num(v.confidence);
+    const u = currentUnit();
+    if (!(conf > 0)) return { amount: null, text: `1 unità = ${money(u.unit)}: scegli la fiducia` };
+    return capped({ amount: conf * u.unit, text: `${conf} ${conf === 1 ? 'unità' : 'unità'} × ${money(u.unit)}` });
+  }
+  if (v.strategy === 'target') {
+    if (!(odds > 1)) return { amount: null, text: `Inserisci la quota (obiettivo ${money(s.targetWin)})` };
+    return capped({ amount: S.targetStake(+s.targetWin, odds), text: `Per vincere ${money(s.targetWin)} a quota ${fmtOdds(odds)}` });
   }
   if (v.strategy === 'masaniello') {
     const m = d.masaniello.find((x) => x.id === v.masanielloId);
@@ -113,6 +203,14 @@ function suggestStake(v) {
     if (!state || state.status !== 'active') return { amount: 0, text: `Masaniello ${MSTATUS[state?.status] || ''}` };
     const amt = C.masanielloStake(state, odds);
     return { amount: amt, text: `Masaniello evento ${state.i + 1}/${state.plan.N} (${state.w}/${state.plan.K} vinte) a quota ${odds > 1 ? odds : state.plan.q}` };
+  }
+  if (v.strategy === 'cycle') {
+    const c = d.cycles.find((x) => x.id === v.cycleId);
+    if (!c) return { amount: null, text: 'Seleziona un ciclo' };
+    const { state } = cycleInfo(c);
+    if (state.status !== 'active') return { amount: 0, text: `Ciclo ${CSTATUS[state.status]}` };
+    const other = state.pending.filter((b) => b.id !== existingId).length;
+    return { amount: state.next, text: `${S.CYCLE_TYPES[c.type].name}, passo ${state.played + 1}${other ? ' (attenzione: c\'è già una giocata in corso nel ciclo)' : ''}` };
   }
   return { amount: null, text: '' };
 }
@@ -124,7 +222,11 @@ const ui = {
   toolTab: 'kelly',
   statGroup: 'sport',
   openMasaniello: null,
+  openCycle: null,
+  sim: null,
+  simResult: null,
   homePeriod: '30',
+  txType: 'deposit',
   calMonth: null,
 };
 
@@ -142,6 +244,7 @@ function render() {
   const scroll = window.scrollY;
   const focusId = document.activeElement?.id;
   views[name]();
+  if (ui.storeError) view.insertAdjacentHTML('afterbegin', `<div class="alert danger" style="margin-bottom:16px">${esc(ui.storeError)}</div>`);
   renderTop();
   if (focusId && document.getElementById(focusId)) {
     const el = document.getElementById(focusId);
@@ -161,7 +264,7 @@ window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); }
 // ---------- HOME ----------
 const PERIODS = [['7', '7G', 7], ['30', '30G', 30], ['90', '3M', 90], ['365', 'Anno', 365], ['all', 'Tutto', 0]];
 const fmtOdds = (o) => (+o || 0).toFixed(2).replace('.', ',');
-const STRAT_LABEL = { flat: 'Flat', kelly: 'Kelly', masaniello: 'Masaniello' };
+const STRAT_LABEL = { flat: 'Flat', kelly: 'Kelly', units: 'Unità', target: 'Profitto fisso', masaniello: 'Masaniello', cycle: 'Ciclo' };
 
 function greeting() {
   const h = new Date().getHours();
@@ -223,6 +326,7 @@ function renderHome() {
   const periodP = profitBetween(from || '0000-00-00');
   const pending = d.bets.filter((x) => !C.isSettled(x)).sort((a, z) => (a.date < z.date ? -1 : 1));
   const activeM = d.masaniello.map((m) => ({ m, ...masanielloInfo(m) })).filter((x) => x.state?.status === 'active');
+  const activeC = d.cycles.map((c) => ({ c, ...cycleInfo(c) })).filter((x) => x.state.status === 'active');
   const when = new Date().toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
   const arrow = (x) => (x > 0.004 ? '▲ ' : x < -0.004 ? '▼ ' : '');
 
@@ -236,6 +340,7 @@ function renderHome() {
         </div>
       </div>
       ${alerts.map((a) => `<div class="alert danger">${esc(a)}</div>`).join('')}
+      ${infoAlerts().map((a) => `<div class="alert">${a}</div>`).join('')}
       <div class="home-row">
         <section class="card hero home-main" style="gap:0">
           <div class="hero-top">
@@ -277,14 +382,15 @@ function renderHome() {
         <section class="home-main">
           <div class="card">
             <div class="card-head"><h2>In corso <span class="muted" style="font-weight:400">· ${pending.length}</span></h2>${pending.length ? '<a href="#bets" data-action="show-pending">Tutte</a>' : ''}</div>
+            ${pending.length ? '<div class="hint swipe-hint">Scorri una schedina: a destra vinta, a sinistra persa.</div>' : ''}
             ${pending.length ? `<div class="bet-list">${pending.slice(0, 6).map(betItem).join('')}</div>` : '<div class="empty">Nessuna scommessa in corso. Tocca + per aggiungerne una.</div>'}
           </div>
         </section>
         <div class="home-side">
           ${calendarCard()}
           <div class="card">
-            <div class="card-head"><span class="label-caps">Masaniello attivi</span><a href="#tools" data-action="tool-tab" data-tab="masaniello">Gestisci</a></div>
-            ${activeM.length ? activeM.map(masanielloMini).join('') : '<div class="hint">Nessun Masaniello attivo.</div>'}
+            <div class="card-head"><span class="label-caps">Cicli attivi</span><a href="#tools" data-action="tool-tab" data-tab="${activeM.length || !activeC.length ? 'masaniello' : 'cycles'}">Gestisci</a></div>
+            ${activeM.length || activeC.length ? activeM.map(masanielloMini).join('') + activeC.map(cycleMini).join('') : '<div class="hint">Nessun Masaniello o ciclo progressivo attivo.</div>'}
           </div>
         </div>
       </div>
@@ -300,19 +406,24 @@ function renderHome() {
 
 function limitsCard() {
   const s = store.get().settings;
-  if (!(s.dailyStopLoss > 0) && !(s.weeklyStopLoss > 0)) {
-    return `<div class="card"><div class="card-head"><span class="label-caps">Limiti di perdita</span><a href="#bankroll">Imposta</a></div>
+  if (!(s.dailyStopLoss > 0) && !(s.weeklyStopLoss > 0) && !(s.monthlyGoal > 0)) {
+    return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#bankroll">Imposta</a></div>
       <div class="hint">Nessun limite impostato. Uno stop-loss giornaliero o settimanale ti aiuta a fermarti nelle giornate storte.</div></div>`;
   }
+  const monthP = profitBetween(today().slice(0, 8) + '01');
   const meter = (label, used, limit) => {
     const w = Math.min(100, (used / limit) * 100);
     return `<div class="meter ${used >= limit ? 'over' : ''}">
       <div class="top"><span>${label}</span><span class="big-num">${fmt(used)} / ${money(limit)}</span></div>
       <div class="bar" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(w)}"><div style="width:${w}%"></div></div></div>`;
   };
-  return `<div class="card"><div class="card-head"><span class="label-caps">Limiti di perdita</span><a href="#bankroll">Modifica</a></div>
-    ${s.dailyStopLoss > 0 ? meter('Oggi', lossSince(today()), s.dailyStopLoss) : ''}
-    ${s.weeklyStopLoss > 0 ? meter('Ultimi 7 giorni', lossSince(daysAgo(6)), s.weeklyStopLoss) : ''}</div>`;
+  const goal = s.monthlyGoal > 0 ? `<div class="meter goal ${monthP >= s.monthlyGoal ? 'done' : ''}">
+      <div class="top"><span>Obiettivo del mese</span><span class="big-num ${cls(monthP)}">${signed(monthP)} / ${money(s.monthlyGoal)}</span></div>
+      <div class="bar" role="progressbar" aria-label="Obiettivo del mese" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(Math.max(0, Math.min(100, (monthP / s.monthlyGoal) * 100)))}"><div style="width:${Math.max(0, Math.min(100, (monthP / s.monthlyGoal) * 100))}%"></div></div></div>` : '';
+  return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#bankroll">Modifica</a></div>
+    ${s.dailyStopLoss > 0 ? meter('Perdita oggi', lossSince(today()), s.dailyStopLoss) : ''}
+    ${s.weeklyStopLoss > 0 ? meter('Perdita ultimi 7 giorni', lossSince(daysAgo(6)), s.weeklyStopLoss) : ''}
+    ${goal}</div>`;
 }
 
 function calendarCard() {
@@ -377,6 +488,17 @@ function masanielloMini({ m, state }) {
   </div>`;
 }
 
+function cycleMini({ c, state }) {
+  const seq = state.history.filter((h) => h !== 'V').slice(-11);
+  const cells = seq.map((h) => `<span class="${h}">${h === 'W' ? 'V' : 'P'}</span>`).concat(`<span class="cur">${state.played + 1}</span>`);
+  return `<div class="mcard">
+    <div class="spread"><strong>${esc(c.name)}</strong><span class="big-num" style="font-size:1.25rem;font-weight:600">${money(state.capital)}</span></div>
+    <div class="mpath" aria-label="Esiti del ciclo">${cells.join('')}</div>
+    <div class="spread hint"><span>${S.CYCLE_TYPES[c.type].name} · <span class="${cls(state.profit)}">${signed(state.profit)}</span></span>
+    <span>Prossima <strong class="big-num" style="font-size:1.05rem;color:var(--text)">${money(state.next)}</strong></span></div>
+  </div>`;
+}
+
 function kpi(label, value, sub) {
   return `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
 }
@@ -385,19 +507,23 @@ function betItem(b) {
   const settled = C.isSettled(b);
   const p = C.betProfit(b);
   const head = [b.sport, b.competition, fmtDate(b.date)].filter(Boolean).join(' · ');
-  const pick = [[b.market, b.selection].filter(Boolean).join(': '), b.bookmaker].filter(Boolean).join(' · ');
-  const strat = STRAT_LABEL[b.strategy] || '';
+  const isMulti = !!(b.legs && b.legs.length);
+  const pick = isMulti
+    ? [b.legs.map((l) => `${l.status === 'won' ? '✓' : l.status === 'lost' ? '✕' : l.status === 'void' ? '↺' : '○'} ${l.selection || l.event}`).join(', '), b.bookmaker].filter(Boolean).join(' · ')
+    : [[b.market, b.selection].filter(Boolean).join(': '), b.bookmaker].filter(Boolean).join(' · ');
+  const strat = [isMulti ? `Multipla ×${b.legs.length}` : '', b.freebet ? 'Freebet' : '', STRAT_LABEL[b.strategy] || ''].filter(Boolean)
+    .map((x) => `<span class="chip strat">${x}</span>`).join('');
   return `
-    <div class="bet ${settled ? 'settled' : ''}" data-action="edit-bet" data-id="${b.id}">
-      <div class="t-head"><span>${esc(head)}</span><span class="chips">${strat ? `<span class="chip strat">${strat}</span>` : ''}<span class="chip ${b.status}">${C.STATUSES[b.status]}</span></span></div>
+    <div class="bet ${settled ? 'settled' : ''}" data-action="edit-bet" data-id="${b.id}"${!settled && !(b.legs && b.legs.length) ? ' data-swipe' : ''}>
+      <div class="t-head"><span>${esc(head)}</span><span class="chips">${strat}<span class="chip ${b.status}">${C.STATUSES[b.status]}</span></span></div>
       <div class="t-body">
         <div style="min-width:0"><div class="title">${esc(b.event || b.selection || 'Scommessa')}</div>${pick ? `<div class="pick">${esc(pick)}</div>` : ''}</div>
         <div class="odds">${fmtOdds(b.odds)}</div>
       </div>
       <div class="t-foot"><span>Puntata <b>${money(b.stake)}</b></span>${settled
         ? `<span>Esito <b class="${cls(p)}">${signed(p)}</b></span>`
-        : `<span>Vincita <b>${money((+b.stake || 0) * (+b.odds || 0))}</b></span>`}</div>
-      ${!settled ? `<div class="quick">
+        : `<span>Vincita <b>${money((+b.stake || 0) * ((+b.odds || 0) - (b.freebet ? 1 : 0)))}</b></span>`}</div>
+      ${!settled && !isMulti ? `<div class="quick">
         <button class="btn ok" data-action="settle" data-id="${b.id}" data-status="won">✓ Vinta</button>
         <button class="btn ko" data-action="settle" data-id="${b.id}" data-status="lost">✕ Persa</button>
         <button class="btn vd" data-action="settle" data-id="${b.id}" data-status="void">↺ Rimb.</button>
@@ -475,11 +601,12 @@ function renderBets() {
 }
 
 function exportCSV() {
-  const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Cashout', 'Profitto', 'Strategia', 'Prob. stimata %', 'Tag', 'Note']];
+  const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Cashout', 'Profitto', 'Strategia', 'Prob. stimata %', 'Freebet', 'Selezioni multipla', 'Tag', 'Note']];
   const n = (x) => (x === '' || x == null || Number.isNaN(+x) ? '' : String(+x).replace('.', ','));
   for (const b of filteredBets()) {
     rows.push([b.date, b.settledDate || '', b.sport, b.competition, b.event, b.market, b.selection, b.bookmaker,
-      n(b.odds), n(b.closingOdds), n(b.stake), C.STATUSES[b.status], n(b.payout), n(C.round2(C.betProfit(b))), b.strategy, n(b.prob), b.tags, b.notes]);
+      n(b.odds), n(b.closingOdds), n(b.stake), C.STATUSES[b.status], n(b.payout), n(C.round2(C.betProfit(b))), b.strategy, n(b.prob), b.freebet ? 'sì' : '',
+      (b.legs || []).map((l) => `${l.event} ${l.market} ${l.selection} @${String(l.odds).replace('.', ',')} (${C.LEG_STATUSES[l.status] || ''})`).join(' | '), b.tags, b.notes]);
   }
   const csv = rows.map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\r\n');
   download(`bankbet-scommesse-${today()}.csv`, '﻿' + csv, 'text/csv');
@@ -487,6 +614,9 @@ function exportCSV() {
 
 // ---------- Dialog scommessa ----------
 let dlgSubmit = null;
+// I listener dei singoli dialoghi vengono rimossi all'apertura del successivo (il form è sempre lo stesso).
+let dlgCtl = new AbortController();
+const dlgOn = () => ({ signal: dlgCtl.signal });
 
 function openDialog(title, body, foot, onSubmit) {
   dlgForm.innerHTML = `
@@ -494,6 +624,8 @@ function openDialog(title, body, foot, onSubmit) {
     <div class="dlg-body">${body}</div>
     <div class="dlg-foot">${foot}</div>`;
   dlgSubmit = onSubmit;
+  dlgCtl.abort();
+  dlgCtl = new AbortController();
   dialog.showModal();
 }
 
@@ -510,6 +642,27 @@ function datalist(id, field) {
   return `<datalist id="${id}">${distinct(field).map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`;
 }
 
+function legRow(l = {}) {
+  return `<div class="leg">
+    <input data-leg="event" value="${esc(l.event || '')}" placeholder="Evento" aria-label="Evento">
+    <input data-leg="market" value="${esc(l.market || '')}" placeholder="Mercato" list="dlMarket" aria-label="Mercato">
+    <input data-leg="selection" value="${esc(l.selection || '')}" placeholder="Selezione" aria-label="Selezione">
+    <input data-leg="odds" value="${l.odds ? String(l.odds).replace('.', ',') : ''}" inputmode="decimal" placeholder="Quota" aria-label="Quota">
+    <select data-leg="status" aria-label="Esito">${Object.entries(C.LEG_STATUSES).map(([k, t]) => `<option value="${k}" ${(l.status || 'pending') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    <button type="button" class="btn small ghost" data-leg-del aria-label="Rimuovi selezione">✕</button>
+  </div>`;
+}
+
+function readLegs(f) {
+  return $$('.leg', f).map((row) => ({
+    event: row.querySelector('[data-leg="event"]').value.trim(),
+    market: row.querySelector('[data-leg="market"]').value.trim(),
+    selection: row.querySelector('[data-leg="selection"]').value.trim(),
+    odds: num(row.querySelector('[data-leg="odds"]').value),
+    status: row.querySelector('[data-leg="status"]').value,
+  })).filter((l) => l.event || l.selection || l.odds > 0);
+}
+
 function openBet(id, preset = {}) {
   const d = store.get();
   const existing = id ? d.bets.find((b) => b.id === id) : null;
@@ -517,15 +670,26 @@ function openBet(id, preset = {}) {
     date: today(), status: 'pending', strategy: d.settings.lastStrategy || 'flat', bookmaker: d.settings.lastBookmaker || '', ...preset,
   };
   const activeM = d.masaniello.filter((m) => masanielloInfo(m).state?.status === 'active' || m.id === b.masanielloId);
+  const activeC = d.cycles.filter((c) => cycleInfo(c).state.status === 'active' || c.id === b.cycleId);
   const v = (k) => esc(b[k] ?? '');
+  const isMulti = !!(b.legs && b.legs.length);
+  const legsInit = isMulti ? b.legs : [{}, {}];
   const body = `
     <div class="form-grid three">
       <label class="field">Data<input type="date" name="date" value="${v('date')}" required></label>
       <label class="field">Sport<input name="sport" list="dlSport" value="${v('sport')}" placeholder="Calcio"></label>
       <label class="field">Competizione<input name="competition" list="dlComp" value="${v('competition')}" placeholder="Serie A"></label>
-      <label class="field full">Evento<input name="event" value="${v('event')}" placeholder="Inter – Milan" autocomplete="off"></label>
-      <label class="field">Mercato<input name="market" list="dlMarket" value="${v('market')}" placeholder="1X2"></label>
-      <label class="field">Selezione<input name="selection" value="${v('selection')}" placeholder="1"></label>
+      <label class="row full" style="font-size:.9rem;gap:16px">
+        <span class="row" style="gap:6px"><input type="checkbox" name="isMulti" value="1" ${isMulti ? 'checked' : ''} style="width:auto;min-height:0"> Multipla</span>
+        <span class="row" style="gap:6px"><input type="checkbox" name="freebet" value="1" ${b.freebet ? 'checked' : ''} style="width:auto;min-height:0"> Freebet (puntata non tua)</span>
+      </label>
+      <label class="field full">Evento<input name="event" value="${v('event')}" placeholder="${isMulti ? 'Nome della multipla (opz.)' : 'Inter – Milan'}" autocomplete="off"></label>
+      <div class="full" id="legsBox" ${isMulti ? '' : 'hidden'}>
+        <div class="legs">${legsInit.map(legRow).join('')}</div>
+        <button type="button" class="btn small" data-leg-add>+ Selezione</button>
+      </div>
+      <label class="field single">Mercato<input name="market" list="dlMarket" value="${isMulti ? '' : v('market')}" placeholder="1X2"></label>
+      <label class="field single">Selezione<input name="selection" value="${isMulti ? '' : v('selection')}" placeholder="1"></label>
       <label class="field">Bookmaker<input name="bookmaker" list="dlBook" value="${v('bookmaker')}"></label>
       <label class="field">Quota<input name="odds" inputmode="decimal" value="${v('odds')}" required placeholder="1,85"></label>
       <label class="field">Prob. stimata %<input name="prob" inputmode="decimal" value="${v('prob')}" placeholder="opz."></label>
@@ -534,13 +698,19 @@ function openBet(id, preset = {}) {
     <div class="form-grid">
       <label class="field">Strategia
         <select name="strategy">
-          ${[['flat', 'Flat (% fissa)'], ['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['manual', 'Manuale']]
+          ${[['flat', 'Flat (% fissa)'], ['kelly', 'Kelly'], ['units', 'Unità a fiducia'], ['target', 'Profitto fisso'], ['masaniello', 'Masaniello'], ['cycle', 'Ciclo progressivo'], ['manual', 'Manuale']]
             .map(([k, l]) => `<option value="${k}" ${b.strategy === k ? 'selected' : ''}>${l}</option>`).join('')}
         </select></label>
       <label class="field" id="mSel">Masaniello
         <select name="masanielloId"><option value="">—</option>
           ${activeM.map((m) => `<option value="${m.id}" ${b.masanielloId === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
         </select></label>
+      <label class="field" id="cSel">Ciclo
+        <select name="cycleId"><option value="">—</option>
+          ${activeC.map((c) => `<option value="${c.id}" ${b.cycleId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        </select></label>
+      <label class="field" id="confF">Fiducia
+        <select name="confidence">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${(+b.confidence || 1) === n ? 'selected' : ''}>${n} ${n === 1 ? 'unità' : 'unità'}</option>`).join('')}</select></label>
     </div>
     <div class="suggest" id="suggest"></div>
     <div id="evLine" class="hint"></div>
@@ -567,31 +737,39 @@ function openBet(id, preset = {}) {
     const fd = Object.fromEntries(new FormData(dlgForm));
     if (action === 'delete') {
       if (!confirm('Eliminare questa scommessa?')) return false;
+      const copy = { ...existing };
       store.remove('bets', existing.id);
-      toast('Scommessa eliminata');
+      toast('Scommessa eliminata', () => store.restore('bets', copy));
       return;
     }
+    const legs = fd.isMulti ? readLegs(dlgForm) : [];
+    if (fd.isMulti && (legs.length < 2 || legs.some((l) => !(l.odds > 1)))) { alert('Una multipla ha bisogno di almeno 2 selezioni, ognuna con quota > 1'); return false; }
     const odds = num(fd.odds), stake = num(fd.stake);
     if (!(odds > 1)) { alert('Inserisci una quota valida (> 1)'); return false; }
     if (!(stake > 0)) { alert('Inserisci una puntata valida'); return false; }
     if (fd.strategy === 'masaniello' && !fd.masanielloId) { alert('Seleziona il Masaniello a cui collegare la scommessa'); return false; }
+    if (fd.strategy === 'cycle' && !fd.cycleId) { alert('Seleziona il ciclo a cui collegare la scommessa'); return false; }
     const item = {
       ...(existing || {}),
-      date: fd.date || today(), sport: fd.sport.trim(), competition: fd.competition.trim(), event: fd.event.trim(),
-      market: fd.market.trim(), selection: fd.selection.trim(), bookmaker: fd.bookmaker.trim(),
-      odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: num(fd.closingOdds) || '',
+      date: fd.date || today(), sport: fd.sport.trim(), competition: fd.competition.trim(),
+      event: fd.event.trim() || (legs.length ? legs.map((l) => l.event || l.selection).filter(Boolean).join(' + ') : ''),
+      market: legs.length ? 'Multipla' : fd.market.trim(), selection: legs.length ? `${legs.length} selezioni` : fd.selection.trim(), bookmaker: fd.bookmaker.trim(),
+      odds: legs.length ? C.round2(C.legsOdds(legs)) : odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: num(fd.closingOdds) || '',
       strategy: fd.strategy, masanielloId: fd.strategy === 'masaniello' ? fd.masanielloId : '',
+      cycleId: fd.strategy === 'cycle' ? fd.cycleId : '', confidence: fd.strategy === 'units' ? +fd.confidence || 1 : '',
       status: fd.status, payout: fd.status === 'cashout' ? num(fd.payout) || 0 : '',
       settledDate: fd.status === 'pending' ? '' : fd.settledDate || today(),
       tags: fd.tags.trim(), notes: fd.notes.trim(),
+      freebet: !!fd.freebet, legs,
     };
     if (action === 'dup') {
       delete item.id; delete item.createdAt;
-      Object.assign(item, { status: 'pending', settledDate: '', payout: '', closingOdds: '', date: today() });
+      Object.assign(item, { status: 'pending', settledDate: '', payout: '', closingOdds: '', date: today(), freebet: false,
+        legs: item.legs.map((l) => ({ ...l, status: 'pending' })) });
     }
     store.upsert('bets', item);
     // Il Masaniello si sceglie dalla sua scheda: non diventa la strategia predefinita.
-    const lastStrategy = item.strategy === 'masaniello' ? d.settings.lastStrategy : item.strategy;
+    const lastStrategy = item.strategy === 'masaniello' || item.strategy === 'cycle' ? d.settings.lastStrategy : item.strategy;
     if (d.settings.lastStrategy !== lastStrategy || d.settings.lastBookmaker !== item.bookmaker) {
       store.updateSettings({ lastStrategy, lastBookmaker: item.bookmaker });
     }
@@ -601,10 +779,25 @@ function openBet(id, preset = {}) {
   const f = dlgForm;
   const update = () => {
     const fd = Object.fromEntries(new FormData(f));
+    const multi = !!fd.isMulti;
+    $('#legsBox').hidden = !multi;
+    for (const el of $$('.single', f)) el.style.display = multi ? 'none' : '';
+    f.odds.readOnly = multi;
+    f.event.placeholder = multi ? 'Nome della multipla (opz.)' : 'Inter – Milan';
+    if (multi) {
+      const legs = readLegs(f);
+      if (legs.length) {
+        const tot = C.legsOdds(legs);
+        if (tot > 1) f.odds.value = String(C.round2(tot)).replace('.', ',');
+        if (fd.status !== 'cashout') f.status.value = C.legsStatus(legs);
+      }
+    }
     $('#mSel').style.display = fd.strategy === 'masaniello' ? '' : 'none';
+    $('#cSel').style.display = fd.strategy === 'cycle' ? '' : 'none';
+    $('#confF').style.display = fd.strategy === 'units' ? '' : 'none';
     $('#payoutF').style.display = fd.status === 'cashout' ? '' : 'none';
     $('#settledF').style.display = fd.status === 'pending' ? 'none' : '';
-    const sg = suggestStake(fd);
+    const sg = suggestStake(fd, existing?.id);
     lastSuggest = sg.amount;
     const box = $('#suggest');
     if (fd.strategy === 'manual' || !sg.text) box.style.display = 'none';
@@ -619,7 +812,17 @@ function openBet(id, preset = {}) {
     $('#evLine').textContent = odds > 1
       ? `Prob. implicita ${pct(1 / odds)}${p > 0 ? ` · EV ${pct(p * odds - 1)} ${p * odds > 1 ? '✓ value bet' : '✗ senza valore'}` : ''}`
       : '';
-    $('#retLine').textContent = odds > 1 && stake > 0 ? `Vincita potenziale ${money(stake * odds)} (netto ${signed(stake * (odds - 1))})` : '';
+    let ret = odds > 1 && stake > 0
+      ? (fd.freebet ? `Freebet: se vince incassi ${money(stake * (odds - 1))}, se perde non perdi nulla` : `Vincita potenziale ${money(stake * odds)} (netto ${signed(stake * (odds - 1))})`)
+      : '';
+    const book = fd.bookmaker.trim();
+    if (book && usesAccounts()) {
+      const a = accounts().find((x) => x.name === book);
+      const own = existing && !C.isSettled(existing) && existing.bookmaker === book ? C.realStake(existing) : 0;
+      const avail = (a ? a.available : 0) + own;
+      ret += `${ret ? ' · ' : ''}Disponibile su ${book}: ${money(avail)}${!fd.freebet && stake > avail + 0.005 ? ' ⚠ saldo del conto insufficiente' : ''}`;
+    }
+    $('#retLine').textContent = ret;
   };
   let lastSuggest = null;
   $('#suggest').addEventListener('click', (e) => {
@@ -627,22 +830,27 @@ function openBet(id, preset = {}) {
     f.stake.value = String(C.round2(lastSuggest)).replace('.', ',');
     update();
   });
-  f.addEventListener('input', update);
-  f.addEventListener('change', update);
+  f.addEventListener('input', update, dlgOn());
+  f.addEventListener('change', update, dlgOn());
+  $('#legsBox').addEventListener('click', (e) => {
+    if (e.target.closest('[data-leg-add]')) { $('.legs', f).insertAdjacentHTML('beforeend', legRow()); update(); }
+    const del = e.target.closest('[data-leg-del]');
+    if (del) { del.closest('.leg').remove(); update(); }
+  });
   update();
   if (!existing) setTimeout(() => f.event.focus(), 50);
 }
 
 // ---------- STRUMENTI ----------
 function renderTools() {
-  const tabs = [['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['value', 'Valore e margine'], ['surebet', 'Surebet']];
+  const tabs = [['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['cycles', 'Cicli progressivi'], ['sim', 'Simulatore'], ['value', 'Valore e margine'], ['surebet', 'Surebet']];
   view.innerHTML = `
     <div class="stack">
       <h2>Strumenti</h2>
       <div class="sub-tabs">${tabs.map(([k, l]) => `<button class="btn small ${ui.toolTab === k ? 'primary' : ''}" data-action="tool-tab" data-tab="${k}">${l}</button>`).join('')}</div>
       <div id="toolBody"></div>
     </div>`;
-  ({ kelly: toolKelly, masaniello: toolMasaniello, value: toolValue, surebet: toolSurebet })[ui.toolTab]($('#toolBody'));
+  ({ kelly: toolKelly, masaniello: toolMasaniello, cycles: toolCycles, sim: toolSim, value: toolValue, surebet: toolSurebet })[ui.toolTab]($('#toolBody'));
 }
 
 function toolKelly(el) {
@@ -789,7 +997,7 @@ function openMasanielloForm() {
       </table>
       <div class="hint">Il Masaniello non crea valore: il risultato atteso dipende solo da quanto la tua % di successo reale supera quella implicita nelle quote.</div>`;
   };
-  dlgForm.addEventListener('input', prev);
+  dlgForm.addEventListener('input', prev, dlgOn());
   prev();
 }
 
@@ -867,6 +1075,228 @@ function toolSurebet(el) {
   });
 }
 
+// ---------- Cicli progressivi ----------
+const CSTATUS = { active: 'Attivo', won: 'Completato ✓', lost: 'Perso', stopped: 'Fermato', closed: 'Chiuso' };
+const CCHIP = { active: 'pending', won: 'won', lost: 'lost', stopped: 'lost', closed: 'void' };
+
+function cycleInfo(c) {
+  const linked = store.get().bets
+    .filter((b) => b.cycleId === c.id)
+    .sort((a, b) => ((a.settledDate || a.date) + (a.createdAt || 0) < (b.settledDate || b.date) + (b.createdAt || 0) ? -1 : 1));
+  return { state: S.cycleState(c, linked), linked };
+}
+
+function cycleGoal(c, state) {
+  if (c.type === 'labouchere') return `sequenza ${esc(c.sequence || '1,2,3')}`;
+  if (c.type === 'ladder') return `obiettivo ${money(state.target)} o ${state.steps} vincite`;
+  return `obiettivo ${money(state.target)}`;
+}
+
+function toolCycles(el) {
+  const list = store.get().cycles.map((c) => ({ c, ...cycleInfo(c) }))
+    .sort((a, b) => (a.state.status === 'active' ? -1 : 0) - (b.state.status === 'active' ? -1 : 0) || (b.c.createdAt || 0) - (a.c.createdAt || 0));
+  el.innerHTML = `
+    <div class="stack">
+      <div class="spread">
+        <p class="hint" style="margin:0;max-width:680px">I cicli progressivi aumentano la puntata dopo le perdite per recuperarle. <strong>Non cambiano il valore atteso</strong>: rendono frequenti i piccoli guadagni e rare ma pesanti le perdite. Usa sempre un budget dedicato e un tetto alla puntata, e prova prima la strategia nel <a href="#tools" data-action="tool-tab" data-tab="sim">simulatore</a>.</p>
+        <button class="btn primary" data-action="new-cycle">+ Nuovo ciclo</button>
+      </div>
+      ${list.length ? list.map(cycleCard).join('') : '<div class="card empty">Nessun ciclo. Creane uno per iniziare.</div>'}
+    </div>`;
+}
+
+function cycleCard({ c, state, linked }) {
+  const open = ui.openCycle === c.id;
+  const T = S.CYCLE_TYPES[c.type] || { name: c.type };
+  const hist = state.history.map((h) => `<span class="${h}">${h === 'W' ? 'V' : h === 'L' ? 'P' : 'R'}</span>`).join('');
+  let more = '';
+  if (open) {
+    more = `
+      <h3>Scommesse collegate (${linked.length})</h3>
+      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map(betItem).join('')}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
+      <div class="row">
+        ${state.status === 'active' ? `<button class="btn" data-action="c-close" data-id="${c.id}">Chiudi ciclo</button>` : ''}
+        ${c.closed ? `<button class="btn" data-action="c-reopen" data-id="${c.id}">Riapri</button>` : ''}
+        <button class="btn danger" data-action="c-delete" data-id="${c.id}">Elimina</button>
+      </div>`;
+  }
+  return `
+    <div class="card stack" style="gap:10px">
+      <div class="spread">
+        <div><strong>${esc(c.name)}</strong> <span class="chip ${CCHIP[state.status]}">${CSTATUS[state.status]}</span>
+        <div class="hint">${T.name} · base ${money(c.base)} · budget ${money(c.budget)} · tetto ${+c.maxStake > 0 ? money(c.maxStake) : 'nessuno'} · ${cycleGoal(c, state)}</div></div>
+        <button class="btn small ghost" data-action="c-toggle" data-id="${c.id}">${open ? 'Chiudi dettagli' : 'Dettagli'}</button>
+      </div>
+      <div class="spread">
+        <div class="hist">${hist || '<span class="hint" style="width:auto;color:var(--muted)">Nessun esito</span>'}</div>
+        <div class="num">Capitale <strong>${money(state.capital)}</strong> <span class="${cls(state.profit)}">(${signed(state.profit)})</span></div>
+      </div>
+      ${state.reason ? `<div class="${state.status === 'won' ? 'hint' : 'alert'}">${esc(state.reason)}</div>` : ''}
+      ${state.status === 'active' ? `<div class="suggest">
+        <span>Passo ${state.played + 1}${state.units ? ` · ${fmt(state.units).replace(',00', '')} unità` : ''}${c.type === 'labouchere' ? ` · sequenza ${state.list.map((x) => fmt(x).replace(',00', '')).join('-')}` : ''}${state.pending.length ? ` · ${state.pending.length} in corso` : ''}<br>
+        Prossima puntata: <strong>${money(state.next)}</strong></span>
+        <button class="btn small primary" data-action="c-bet" data-id="${c.id}">+ Scommessa</button>
+      </div>` : ''}
+      ${more}
+    </div>`;
+}
+
+// Puntate che il ciclo richiederebbe con una serie di perdite consecutive.
+function lossRun(c) {
+  const fake = [];
+  const stakes = [];
+  for (let i = 0; i < 40; i++) {
+    const st = S.cycleState(c, fake);
+    if (st.status !== 'active') break;
+    stakes.push(st.next);
+    fake.push({ status: 'lost', stake: st.next, odds: 2 });
+  }
+  return stakes;
+}
+
+function openCycleForm() {
+  const { available } = balances();
+  const base = Math.max(1, C.round2(available * 0.01));
+  const dec = (x) => String(C.round2(x)).replace('.', ',');
+  const body = `
+    <div class="form-grid">
+      <label class="field full">Nome<input name="name" value="Ciclo ${store.get().cycles.length + 1}" required></label>
+      <label class="field full">Tipo
+        <select name="type">${Object.entries(S.CYCLE_TYPES).map(([k, t]) => `<option value="${k}">${t.name}</option>`).join('')}</select></label>
+      <div class="hint full" id="cDesc"></div>
+      <label class="field">Puntata base / unità<input name="base" inputmode="decimal" value="${dec(base)}" required></label>
+      <label class="field">Budget del ciclo<input name="budget" inputmode="decimal" value="${dec(base * 20)}" required></label>
+      <label class="field">Tetto puntata<input name="maxStake" inputmode="decimal" value="${dec(base * 8)}" placeholder="0 = nessuno"></label>
+      <label class="field" id="cTarget">Profitto obiettivo<input name="target" inputmode="decimal" value="${dec(base)}"></label>
+      <label class="field" id="cSeq">Sequenza (unità)<input name="sequence" value="1,2,3"></label>
+      <label class="field" id="cSteps">Vincite da concatenare<input name="steps" inputmode="numeric" value="3"></label>
+    </div>
+    <div id="cPrev"></div>`;
+  const foot = `<button type="button" class="btn" data-close>Annulla</button><button type="submit" class="btn primary">Crea</button>`;
+  const read = () => {
+    const fd = Object.fromEntries(new FormData(dlgForm));
+    return { name: fd.name.trim() || 'Ciclo', type: fd.type, base: num(fd.base), budget: num(fd.budget), maxStake: num(fd.maxStake) || 0,
+      target: num(fd.target) || 0, sequence: fd.sequence.trim(), steps: parseInt(fd.steps, 10) || 3 };
+  };
+  openDialog('Nuovo ciclo progressivo', body, foot, () => {
+    const c = read();
+    if (!(c.base > 0) || !(c.budget >= c.base)) { toast('Servono una puntata base > 0 e un budget almeno pari alla base'); return false; }
+    const saved = store.upsert('cycles', { ...c, base: C.round2(c.base), budget: C.round2(c.budget) });
+    ui.openCycle = saved.id;
+    toast('Ciclo creato');
+  });
+  const prev = () => {
+    const c = read();
+    $('#cDesc').textContent = S.CYCLE_TYPES[c.type].desc;
+    $('#cTarget').style.display = c.type === 'labouchere' ? 'none' : '';
+    $('#cSeq').style.display = c.type === 'labouchere' ? '' : 'none';
+    $('#cSteps').style.display = c.type === 'ladder' ? '' : 'none';
+    const el = $('#cPrev');
+    if (!(c.base > 0) || !(c.budget > 0)) { el.innerHTML = ''; return; }
+    if (c.type === 'ladder') {
+      el.innerHTML = `<div class="hint">Rischio massimo per ciclo: la puntata iniziale (${money(c.base)}). Con quota 2,00 e ${c.steps} vincite di fila l'incasso sarebbe ${money(c.base * 2 ** c.steps)}, ma la probabilità di centrarle tutte scende rapidamente (al 50% per giocata: ${pct(0.5 ** c.steps)}).</div>`;
+      return;
+    }
+    const run = lossRun(c);
+    el.innerHTML = `<div class="suggest" style="display:block">Con perdite consecutive le puntate sarebbero: <strong>${run.slice(0, 10).map((x) => fmt(x)).join(' · ')}${run.length > 10 ? ' …' : ''}</strong><br>
+      Il ciclo regge <strong>${run.length}</strong> perdite di fila prima di fermarsi per budget o tetto${run.length ? `, con una perdita massima di ${money(run.reduce((a, x) => a + x, 0))}` : ''}.</div>`;
+  };
+  dlgForm.addEventListener('input', prev, dlgOn());
+  dlgForm.addEventListener('change', prev, dlgOn());
+  prev();
+}
+
+// ---------- Simulatore ----------
+function simDefaults() {
+  const d = store.get();
+  const s = d.settings;
+  const sum = C.summarize(d.bets);
+  const odds = sum.avgOdds > 1 ? C.round2(sum.avgOdds) : 2;
+  const p = sum.settled >= 50 ? C.round2(sum.winRate * 100) : C.round2(100 / odds + 2);
+  return {
+    bank: Math.max(100, Math.round(balances().balance)) || 1000, n: 500, odds, p, pEst: p, sims: 1000,
+    stakePct: +s.flatPct || 2, kellyFrac: +s.kellyFraction || 0.25, strategies: ['flat', 'kelly', 'fibonacci', 'martingale'],
+  };
+}
+
+function toolSim(el) {
+  const v = ui.sim || (ui.sim = simDefaults());
+  const dec = (x) => String(x).replace('.', ',');
+  el.innerHTML = `
+    <div class="stack">
+      <div class="card stack">
+        <h3>Simulatore Monte Carlo</h3>
+        <p class="hint" style="margin:0">Simula migliaia di sequenze di giocate e confronta le strategie sugli <strong>stessi esiti casuali</strong>. La probabilità reale decide i risultati; quella stimata serve solo a Kelly, così puoi vedere cosa succede se sopravvaluti le tue giocate.</p>
+        <div class="form-grid three">
+          <label class="field">Bankroll iniziale<input id="simBank" inputmode="decimal" value="${dec(v.bank)}"></label>
+          <label class="field">Giocate per simulazione<input id="simN" inputmode="numeric" value="${v.n}"></label>
+          <label class="field">Simulazioni<select id="simSims">${[500, 1000, 2000, 5000].map((x) => `<option ${+v.sims === x ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+          <label class="field">Quota media<input id="simOdds" inputmode="decimal" value="${dec(v.odds)}"></label>
+          <label class="field">Probabilità reale %<input id="simP" inputmode="decimal" value="${dec(v.p)}"></label>
+          <label class="field">Probabilità stimata % (Kelly)<input id="simPEst" inputmode="decimal" value="${dec(v.pEst)}"></label>
+          <label class="field">Puntata / unità base (% bankroll)<input id="simStake" inputmode="decimal" value="${dec(v.stakePct)}"></label>
+          <label class="field">Frazione Kelly
+            <select id="simKF">${[[1, 'Pieno'], [0.5, '½'], [0.25, '¼'], [0.1, '1/10']].map(([x, l]) => `<option value="${x}" ${+v.kellyFrac === x ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        </div>
+        <div class="row" role="group" aria-label="Strategie da confrontare">
+          ${S.SIM_STRATEGIES.map(([k, l], i) => `<label class="pill" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;min-height:36px">
+            <input type="checkbox" class="simS" value="${k}" ${v.strategies.includes(k) ? 'checked' : ''} style="width:auto;min-height:0">
+            <i style="width:12px;height:3px;border-radius:2px;background:var(--s${i + 1})"></i>${l}</label>`).join('')}
+        </div>
+        <div class="hint" id="simEv"></div>
+        <div class="row"><button class="btn primary" data-action="sim-run">Avvia simulazione</button></div>
+      </div>
+      <div id="simOut"></div>
+    </div>`;
+  const evLine = () => {
+    const o = num($('#simOdds').value), p = num($('#simP').value) / 100;
+    $('#simEv').textContent = o > 1 && p > 0 ? `Valore atteso per giocata: ${pct(p * o - 1)} (probabilità implicita della quota ${pct(1 / o)})${p * o < 1 ? ' — con EV negativo nessuna strategia può guadagnare nel lungo periodo.' : ''}` : '';
+  };
+  el.addEventListener('input', evLine);
+  evLine();
+  if (ui.simResult) drawSim();
+}
+
+function runSim() {
+  const v = {
+    bank: num($('#simBank').value), n: parseInt($('#simN').value, 10), sims: parseInt($('#simSims').value, 10),
+    odds: num($('#simOdds').value), p: num($('#simP').value), pEst: num($('#simPEst').value),
+    stakePct: num($('#simStake').value), kellyFrac: +$('#simKF').value,
+    strategies: $$('.simS').filter((x) => x.checked).map((x) => x.value),
+  };
+  if (!(v.bank > 0) || !(v.n >= 10 && v.n <= 5000) || !(v.odds > 1) || !(v.p > 0 && v.p < 100) || !(v.pEst > 0 && v.pEst < 100) || !(v.stakePct > 0 && v.stakePct <= 100)) {
+    toast('Controlla i parametri: giocate tra 10 e 5000, quota > 1, probabilità tra 0 e 100');
+    return;
+  }
+  if (!v.strategies.length) { toast('Scegli almeno una strategia'); return; }
+  ui.sim = v;
+  ui.simResult = S.simulate({ ...v, p: v.p / 100, pEst: v.pEst / 100 });
+  render();
+}
+
+function drawSim() {
+  const r = ui.simResult, v = ui.sim;
+  const name = Object.fromEntries(S.SIM_STRATEGIES);
+  const slot = (k) => S.SIM_STRATEGIES.findIndex(([x]) => x === k) + 1;
+  const css = getComputedStyle(document.documentElement);
+  $('#simOut').innerHTML = `
+    <div class="card stack">
+      <div class="card-head" style="margin:0"><h3>Andamento mediano del bankroll</h3><span class="hint">${v.sims} simulazioni × ${v.n} giocate</span></div>
+      <div class="legend">${r.results.map((x) => `<span><i style="background:var(--s${slot(x.key)})"></i>${name[x.key]}</span>`).join('')}</div>
+      <div class="chart-wrap"><canvas class="chart" id="chSim" style="height:260px" role="img" aria-label="Bankroll mediano per strategia lungo le giocate"></canvas></div>
+      <div class="table-wrap"><table>
+        <tr><th>Strategia</th><th>Mediana finale</th><th>10% peggiori</th><th>10% migliori</th><th>Chiude in utile</th><th>Rovina</th><th>Drawdown mediano</th></tr>
+        ${r.results.map((x) => `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;background:var(--s${slot(x.key)})"></i>${name[x.key]}</td>
+          <td class="${cls(x.median - v.bank)}">${money(x.median)}</td><td>${money(x.p10)}</td><td>${money(x.p90)}</td>
+          <td>${pct(x.profitProb, 0)}</td><td class="${x.ruin > 0.05 ? 'neg' : ''}">${pct(x.ruin, 1)}</td><td>${pct(x.medianDD, 0)}</td></tr>`).join('')}
+      </table></div>
+      <div class="hint">Rovina = bankroll sceso sotto l'1% di quello iniziale. Kelly punta ${pct(r.kellyF, 2)} del bankroll a giocata con la probabilità stimata. Le progressioni usano ${money(r.unit)} come unità e ripartono dopo aver recuperato un'unità di profitto; la martingala raddoppia dopo ogni perdita senza tetto.</div>
+    </div>`;
+  multiLineChart($('#chSim'), r.results.map((x) => ({ name: name[x.key], color: css.getPropertyValue(`--s${slot(x.key)}`).trim(), points: x.path.map((p) => ({ x: p.i, y: p.v })) })), {
+    fmtValue: money, fmtX: (x) => `giocata ${Math.round(x)}`, baseline: v.bank,
+  });
+}
+
 // ---------- STATISTICHE ----------
 function renderStats() {
   const d = store.get();
@@ -879,7 +1309,7 @@ function renderStats() {
     competition: ['Competizione', (b) => b.competition],
     market: ['Mercato', (b) => b.market],
     bookmaker: ['Bookmaker', (b) => b.bookmaker],
-    strategy: ['Strategia', (b) => ({ flat: 'Flat', kelly: 'Kelly', masaniello: 'Masaniello', manual: 'Manuale' }[b.strategy])],
+    strategy: ['Strategia', (b) => ({ flat: 'Flat', kelly: 'Kelly', units: 'Unità a fiducia', target: 'Profitto fisso', masaniello: 'Masaniello', cycle: 'Ciclo progressivo', manual: 'Manuale' }[b.strategy])],
     odds: ['Fascia di quota', (b) => C.oddsBucket(b.odds)],
     tag: ['Tag', null],
     weekday: ['Giorno', (b) => new Date(b.date + 'T12:00').toLocaleDateString('it-IT', { weekday: 'long' })],
@@ -890,6 +1320,14 @@ function renderStats() {
     for (const b of bets) for (const t of String(b.tags || '').split(',').map((x) => x.trim()).filter(Boolean)) expanded.push({ ...b, _tag: t });
     rows = C.groupBy(expanded, (b) => b._tag);
   } else rows = C.groupBy(bets, groups[ui.statGroup][1]);
+  const legs = bets.filter((b) => b.legs && b.legs.length).flatMap((b) => b.legs).filter((l) => l.status === 'won' || l.status === 'lost');
+  const legGroups = [...legs.reduce((m, l) => {
+    const k = l.market || '—';
+    const g = m.get(k) || { key: k, n: 0, won: 0, odds: 0 };
+    g.n++; g.odds += +l.odds || 0; if (l.status === 'won') g.won++;
+    return m.set(k, g);
+  }, new Map()).values()].sort((a, b) => b.n - a.n);
+  const bonusTot = d.transactions.filter((t) => t.type === 'bonus').reduce((a, t) => a + +t.amount, 0);
   const withProb = bets.filter((b) => C.isSettled(b) && +b.prob > 0 && b.status !== 'void');
   const actualProb = withProb.reduce((a, b) => a + C.betProfit(b), 0);
 
@@ -905,6 +1343,11 @@ function renderStats() {
         ${kpi('Max drawdown', money(maxDrawdown), 'dal picco di profitto')}
       </div>
       <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
+      ${bonusTot || s.freebetN ? `<div class="card"><h3>Bonus e freebet</h3><p class="hint" style="margin:0">Bonus accreditati <strong>${money(bonusTot)}</strong> · freebet giocate <strong>${s.freebetN}</strong> con profitto <strong class="${cls(s.freebetProfit)}">${signed(s.freebetProfit)}</strong>. Lo yield considera solo le giocate con denaro reale.</p></div>` : ''}
+      ${legGroups.length ? `<div class="card"><h3>Selezioni delle multiple</h3>
+        <div class="table-wrap"><table><tr><th>Mercato</th><th>Selezioni</th><th>Vinte</th><th>% vinte</th><th>Quota media</th><th>% implicita</th></tr>
+        ${legGroups.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.n}</td><td>${g.won}</td><td class="${cls(g.won / g.n - g.n / g.odds)}">${pct(g.won / g.n, 0)}</td><td>${fmtOdds(g.odds / g.n)}</td><td>${pct(g.n / g.odds, 0)}</td></tr>`).join('')}
+        </table></div><div class="hint">Confronta la % di selezioni vinte con quella implicita nelle quote: se è più bassa, quel mercato ti fa perdere valore nelle multiple.</div></div>` : ''}
       ${withProb.length ? `<div class="card"><h3>Le tue stime funzionano?</h3>
         <p class="hint" style="margin:0">Sulle ${withProb.length} scommesse con probabilità stimata, il profitto atteso era <strong>${signed(s.ev)}</strong>, quello reale <strong class="${cls(actualProb)}">${signed(actualProb)}</strong>.
         Con pochi campioni la varianza domina: valuta il dato dopo almeno 200–300 scommesse. Il CLV positivo è l'indicatore più rapido di un vantaggio reale.</p></div>` : ''}
@@ -939,21 +1382,27 @@ function renderBankroll() {
       <div class="kpis">
         ${kpi('Saldo', money(b.balance), `disponibile ${money(b.available)}`)}
         ${kpi('Depositato netto', money(b.deposited), 'depositi − prelievi')}
-        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, 'dalle scommesse')}
+        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, b.bonus ? `dalle scommesse · bonus ${money(b.bonus)}` : 'dalle scommesse')}
       </div>
+      ${accountsCard()}
       <div class="grid grid-2">
         <div class="card stack">
           <h3>Movimenti</h3>
           <div class="form-grid">
-            <label class="field">Tipo<select id="txType"><option value="deposit">Deposito</option><option value="withdrawal">Prelievo</option></select></label>
+            <label class="field">Tipo<select id="txType">${Object.entries(TX_TYPES).map(([k, l]) => `<option value="${k}" ${ui.txType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
             <label class="field">Importo<input id="txAmount" inputmode="decimal"></label>
+            ${ui.txType === 'transfer' ? `
+            <label class="field">Da<input id="txFrom" list="dlAcc" placeholder="${NO_ACCOUNT}"></label>
+            <label class="field">A<input id="txTo" list="dlAcc" placeholder="es. Snai"></label>` : `
+            <label class="field full">Conto (bookmaker)<input id="txBook" list="dlAcc" placeholder="opz. es. Snai"></label>`}
             <label class="field">Data<input id="txDate" type="date" value="${today()}"></label>
             <label class="field">Nota<input id="txNote" placeholder="opz."></label>
           </div>
+          <datalist id="dlAcc">${[...new Set([...distinct('bookmaker'), ...d.transactions.flatMap((t) => [t.bookmaker, t.from, t.to])].filter(Boolean))].sort().map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
           <button class="btn primary" data-action="add-tx">Registra movimento</button>
           ${txs.length ? `<div class="table-wrap"><table>
-            ${txs.map((t) => `<tr><td>${fmtDate(t.date)} <span class="muted">${esc(t.note || '')}</span></td>
-              <td class="${t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</td>
+            ${txs.map((t) => `<tr><td>${fmtDate(t.date)} <span class="muted">${esc(t.type === 'transfer' ? `${t.from || NO_ACCOUNT} → ${t.to || NO_ACCOUNT}` : [TX_TYPES[t.type] !== 'Deposito' && TX_TYPES[t.type] !== 'Prelievo' ? TX_TYPES[t.type] : '', t.bookmaker].filter(Boolean).join(' · '))} ${esc(t.note || '')}</span></td>
+              <td class="${t.type === 'transfer' ? '' : t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'transfer' ? '⇄ ' : t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</td>
               <td style="width:1%"><button class="btn small ghost" data-action="del-tx" data-id="${t.id}" aria-label="Elimina">✕</button></td></tr>`).join('')}
           </table></div>` : ''}
         </div>
@@ -967,8 +1416,22 @@ function renderBankroll() {
             <label class="field">Valuta<input data-setting="currency" value="${esc(s.currency)}" maxlength="4"></label>
             <label class="field">Stop-loss giornaliero<input data-setting="dailyStopLoss" inputmode="decimal" value="${s.dailyStopLoss || ''}" placeholder="0 = off"></label>
             <label class="field">Stop-loss settimanale<input data-setting="weeklyStopLoss" inputmode="decimal" value="${s.weeklyStopLoss || ''}" placeholder="0 = off"></label>
+            <label class="field">Stop-win giornaliero<input data-setting="dailyStopWin" inputmode="decimal" value="${s.dailyStopWin || ''}" placeholder="0 = off"></label>
+            <label class="field">Obiettivo mensile<input data-setting="monthlyGoal" inputmode="decimal" value="${s.monthlyGoal || ''}" placeholder="0 = off"></label>
+            <label class="field">Esposizione massima (% saldo)<input data-setting="maxExposurePct" inputmode="decimal" value="${s.maxExposurePct || ''}" placeholder="0 = off"></label>
+            <label class="field">Kelly con incertezza
+              <select data-setting="kellyAdaptive" data-type="bool"><option value="0" ${!s.kellyAdaptive ? 'selected' : ''}>No</option><option value="1" ${s.kellyAdaptive ? 'selected' : ''}>Sì</option></select></label>
           </div>
-          <div class="hint">Le percentuali si applicano al bankroll disponibile (saldo meno le puntate in corso). Lo stop-loss mostra un avviso quando la perdita del periodo supera il limite.</div>
+          <div class="hint">Le percentuali si applicano al bankroll disponibile (saldo meno le puntate in corso). L'esposizione massima limita la somma delle puntate in corso più la nuova. Kelly con incertezza avvicina la tua probabilità a quella della quota in base a quanto le tue stime hanno funzionato finora (affidabilità attuale ${Math.round(S.estimateReliability(d.bets).w * 100)}%).</div>
+          <h3 style="margin-top:6px">Unità e profitto fisso</h3>
+          <div class="form-grid">
+            <label class="field">1 unità (% bankroll)<input data-setting="unitPct" inputmode="decimal" value="${s.unitPct}"></label>
+            <label class="field">Ricalcolo unità
+              <select data-setting="unitRecalc" data-type="text"><option value="month" ${s.unitRecalc !== 'change' ? 'selected' : ''}>A inizio mese</option><option value="change" ${s.unitRecalc === 'change' ? 'selected' : ''}>A variazione del bankroll</option></select></label>
+            ${s.unitRecalc === 'change' ? `<label class="field">Soglia di ricalcolo (%)<input data-setting="unitChangePct" inputmode="decimal" value="${s.unitChangePct}"></label>` : ''}
+            <label class="field">Profitto fisso per giocata<input data-setting="targetWin" inputmode="decimal" value="${s.targetWin}"></label>
+          </div>
+          <div class="hint">Oggi 1 unità vale <strong>${money(currentUnit().unit)}</strong> (riferimento ${money(currentUnit().base)}). Con il profitto fisso la puntata è obiettivo ÷ (quota − 1).</div>
         </div>
       </div>
       <div class="grid grid-2">
@@ -1018,13 +1481,30 @@ function renderBankroll() {
   for (const inp of $$('[data-setting]')) {
     inp.addEventListener('change', () => {
       const k = inp.dataset.setting;
-      const val = k === 'currency' ? inp.value.trim() || '€' : Math.max(0, num(inp.value) || 0);
+      const type = inp.dataset.type;
+      const val = k === 'currency' ? inp.value.trim() || '€' : type === 'text' ? inp.value : type === 'bool' ? inp.value === '1' : Math.max(0, num(inp.value) || 0);
       store.updateSettings({ [k]: val });
       toast('Impostazione salvata');
     });
   }
+  $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
   $('#themeSel').addEventListener('change', (e) => { localStorage.setItem('bankbet.theme', e.target.value); applyTheme(); render(); });
   $('#importFile').addEventListener('change', importJSON);
+}
+
+function accountsCard() {
+  const list = accounts().filter((a) => Math.abs(a.balance) > 0.004 || a.pending > 0 || a.bets);
+  if (!list.length) return '';
+  const unassigned = list.find((a) => a.name === NO_ACCOUNT);
+  return `<div class="card">
+    <div class="card-head"><h3>Conti per bookmaker</h3><span class="hint">${list.filter((a) => a.name !== NO_ACCOUNT).length} conti</span></div>
+    <div class="table-wrap"><table>
+      <tr><th>Conto</th><th>Saldo</th><th>In gioco</th><th>Disponibile</th><th>Profitto scommesse</th><th>Scommesse</th></tr>
+      ${list.map((a) => `<tr><td>${esc(a.name)}</td><td><strong>${money(a.balance)}</strong></td><td>${money(a.pending)}</td>
+        <td class="${a.available < -0.004 ? 'neg' : ''}">${money(a.available)}</td><td class="${cls(a.profit)}">${signed(a.profit)}</td><td>${a.bets}</td></tr>`).join('')}
+    </table></div>
+    ${unassigned && list.length > 1 ? `<div class="hint" style="margin-top:8px">Se un conto risulta negativo, registra il deposito su quel bookmaker o un trasferimento da "${NO_ACCOUNT}" verso di esso.</div>` : ''}
+  </div>`;
 }
 
 function importJSON(e) {
@@ -1054,12 +1534,7 @@ const actions = {
   },
   'new-bet'() { openBet(); },
   'edit-bet'(el) { openBet(el.dataset.id); },
-  settle(el) {
-    const b = store.get().bets.find((x) => x.id === el.dataset.id);
-    if (!b) return;
-    store.upsert('bets', { ...b, status: el.dataset.status, settledDate: today() });
-    toast(`Esito: ${C.STATUSES[el.dataset.status]}`);
-  },
+  settle(el) { settleBet(el.dataset.id, el.dataset.status); },
   'more-bets'() { ui.betLimit += 100; render(); },
   'home-period'(el) { ui.homePeriod = el.dataset.period; render(); },
   'cal-move'(el) {
@@ -1077,6 +1552,24 @@ const actions = {
   'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
   'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
   'new-masaniello': openMasanielloForm,
+  'new-cycle': openCycleForm,
+  'sim-run': runSim,
+  'c-toggle'(el) { ui.openCycle = ui.openCycle === el.dataset.id ? null : el.dataset.id; render(); },
+  'c-bet'(el) { openBet(null, { strategy: 'cycle', cycleId: el.dataset.id }); },
+  'c-close'(el) {
+    const c = store.get().cycles.find((x) => x.id === el.dataset.id);
+    store.upsert('cycles', { ...c, closed: true });
+  },
+  'c-reopen'(el) {
+    const c = store.get().cycles.find((x) => x.id === el.dataset.id);
+    store.upsert('cycles', { ...c, closed: false });
+  },
+  'c-delete'(el) {
+    if (!confirm('Eliminare il ciclo? Le scommesse collegate restano ma perdono il collegamento.')) return;
+    const id = el.dataset.id;
+    for (const b of store.get().bets.filter((x) => x.cycleId === id)) store.upsert('bets', { ...b, cycleId: '', strategy: 'manual' });
+    store.remove('cycles', id);
+  },
   'm-toggle'(el) { ui.openMasaniello = ui.openMasaniello === el.dataset.id ? null : el.dataset.id; render(); },
   'm-bet'(el) { openBet(null, { strategy: 'masaniello', masanielloId: el.dataset.id }); },
   'm-close'(el) {
@@ -1097,11 +1590,20 @@ const actions = {
   'add-tx'() {
     const amount = num($('#txAmount').value);
     if (!(amount > 0)) { alert('Inserisci un importo valido'); return; }
-    store.upsert('transactions', { type: $('#txType').value, amount: C.round2(amount), date: $('#txDate').value || today(), note: $('#txNote').value.trim() });
+    const type = $('#txType').value;
+    const base = { type, amount: C.round2(amount), date: $('#txDate').value || today(), note: $('#txNote').value.trim() };
+    if (type === 'transfer') {
+      const from = $('#txFrom').value.trim(), to = $('#txTo').value.trim();
+      if (from === to) { alert('Scegli due conti diversi'); return; }
+      store.upsert('transactions', { ...base, from, to });
+    } else store.upsert('transactions', { ...base, bookmaker: $('#txBook').value.trim() });
     toast('Movimento registrato');
   },
   'del-tx'(el) {
-    if (confirm('Eliminare il movimento?')) store.remove('transactions', el.dataset.id);
+    const t = store.get().transactions.find((x) => x.id === el.dataset.id);
+    if (!t || !confirm('Eliminare il movimento?')) return;
+    store.remove('transactions', t.id);
+    toast('Movimento eliminato', () => store.restore('transactions', { ...t }));
   },
   'save-sync'() {
     const cfg = sync.setConfig({
@@ -1126,7 +1628,9 @@ const actions = {
   },
 };
 
+let suppressClick = false;
 view.addEventListener('click', (e) => {
+  if (suppressClick) { e.preventDefault(); return; }
   const el = e.target.closest('[data-action]');
   if (!el || !actions[el.dataset.action]) return;
   if (el.tagName === 'A' && el.dataset.action === 'tool-tab') ui.toolTab = el.dataset.tab;
@@ -1138,6 +1642,46 @@ dlgForm.addEventListener('click', (e) => {
   if (el && actions[el.dataset.action]) { e.preventDefault(); actions[el.dataset.action](el); }
 });
 $('#fab').addEventListener('click', () => openBet());
+
+// Swipe sulle schedine in corso (touch): destra = vinta, sinistra = persa.
+let swipe = null;
+view.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'mouse') return;
+  const el = e.target.closest('.bet[data-swipe]');
+  if (!el || e.target.closest('button')) return;
+  swipe = { el, x: e.clientX, y: e.clientY, dx: 0, active: false, id: e.pointerId };
+});
+view.addEventListener('pointermove', (e) => {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+  if (!swipe.active) {
+    if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
+    if (Math.abs(dx) < 12) return;
+    swipe.active = true;
+  }
+  swipe.dx = dx;
+  swipe.el.style.transform = `translateX(${dx}px)`;
+  swipe.el.dataset.dir = dx > 0 ? 'won' : 'lost';
+  swipe.el.classList.toggle('armed', Math.abs(dx) > 90);
+});
+const endSwipe = () => {
+  if (!swipe) return;
+  const { el, dx, active } = swipe;
+  swipe = null;
+  if (!active) return;
+  suppressClick = true;
+  setTimeout(() => { suppressClick = false; }, 60);
+  el.style.transition = 'transform .15s';
+  if (Math.abs(dx) > 90) {
+    el.style.transform = `translateX(${dx > 0 ? 110 : -110}%)`;
+    setTimeout(() => settleBet(el.dataset.id, dx > 0 ? 'won' : 'lost'), 150);
+  } else {
+    el.style.transform = '';
+    setTimeout(() => { el.style.transition = ''; delete el.dataset.dir; el.classList.remove('armed'); }, 160);
+  }
+};
+view.addEventListener('pointerup', endSwipe);
+view.addEventListener('pointercancel', endSwipe);
 
 // ---------- Sync ----------
 const syncBtn = $('#syncBtn');
@@ -1163,6 +1707,11 @@ async function runSync(verbose = false) {
   if (current() === 'bankroll') render();
 }
 syncBtn.addEventListener('click', () => runSync(true));
+
+store.onError((e) => {
+  ui.storeError = `Impossibile salvare i dati su questo dispositivo (${e.name === 'QuotaExceededError' ? 'memoria del browser piena' : e.message}). Esporta subito un backup da Bankroll → Backup.`;
+  render();
+});
 
 let syncTimer;
 store.onChange(({ fromSync }) => {

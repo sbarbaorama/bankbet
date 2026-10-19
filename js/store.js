@@ -1,8 +1,9 @@
 // Stato dell'app, persistenza locale e merge per la sincronizzazione.
 
 const KEY = 'bankbet.data.v1';
-const COLLECTIONS = ['bets', 'transactions', 'masaniello'];
+const COLLECTIONS = ['bets', 'transactions', 'masaniello', 'cycles'];
 const listeners = new Set();
+const errorListeners = new Set();
 
 export function emptyData() {
   return {
@@ -14,11 +15,20 @@ export function emptyData() {
       flatPct: 2,
       dailyStopLoss: 0,
       weeklyStopLoss: 0,
+      dailyStopWin: 0,
+      monthlyGoal: 0,
+      unitPct: 1,
+      unitRecalc: 'month',
+      unitChangePct: 10,
+      targetWin: 10,
+      kellyAdaptive: false,
+      maxExposurePct: 0,
       updatedAt: 0,
     },
     bets: [],
     transactions: [],
     masaniello: [],
+    cycles: [],
     deleted: {},
   };
 }
@@ -32,6 +42,7 @@ function normalize(d) {
     bets: Array.isArray(d.bets) ? d.bets : [],
     transactions: Array.isArray(d.transactions) ? d.transactions : [],
     masaniello: Array.isArray(d.masaniello) ? d.masaniello : [],
+    cycles: Array.isArray(d.cycles) ? d.cycles : [],
     deleted: d.deleted && typeof d.deleted === 'object' ? d.deleted : {},
   };
 }
@@ -50,13 +61,25 @@ function persist(fromSync = false) {
   try {
     localStorage.setItem(KEY, JSON.stringify(data));
   } catch (e) {
-    alert('Impossibile salvare i dati localmente: ' + e.message);
+    for (const fn of errorListeners) fn(e);
   }
   for (const fn of listeners) fn({ fromSync });
 }
 
 export function onChange(fn) {
   listeners.add(fn);
+}
+
+export function onError(fn) {
+  errorListeners.add(fn);
+}
+
+// Ripristina un elemento appena cancellato (annulla).
+export function restore(collection, item) {
+  delete data.deleted[item.id];
+  data[collection] = data[collection].filter((x) => x.id !== item.id);
+  data[collection].push({ ...item, updatedAt: Date.now() });
+  persist();
 }
 
 export function get() {

@@ -4,15 +4,24 @@ Web app (PWA) per registrare scommesse e gestire il bankroll. Funziona su PC e s
 
 ## Funzioni
 
-- **Registro scommesse**: evento, sport, competizione, mercato, selezione, bookmaker, quota, puntata, esito (vinta, persa, rimborsata, mezza vinta/persa, cashout), tag e note. Chiusura rapida dell'esito con un tocco, ricerca e filtri, duplicazione.
-- **Bankroll**: depositi e prelievi, saldo e disponibile (al netto delle puntate in corso), grafico dell'andamento e profitto mensile.
+- **Registro scommesse (schedine)**: evento, sport, competizione, mercato, selezione, bookmaker, quota, puntata, esito (vinta, persa, rimborsata, mezza vinta/persa, cashout), tag e note. Chiusura rapida dell'esito con un tocco o con uno swipe su telefono (destra = vinta, sinistra = persa), con **Annulla** subito dopo. Ricerca, filtri, duplicazione.
+- **Multiple**: ogni selezione con la sua quota ed esito; quota totale ed esito della multipla calcolati in automatico. In Statistiche, la % di selezioni vinte per mercato confrontata con quella implicita nelle quote.
+- **Freebet e bonus**: la freebet perde zero e incassa solo la vincita netta; i bonus accreditati sono un movimento a parte. Lo yield considera solo le giocate con denaro reale.
+- **Bankroll e conti**: depositi, prelievi, bonus e trasferimenti tra conti; saldo e disponibile per ogni bookmaker, con avviso se la puntata supera il saldo del conto.
+- **Home**: bankroll con grafico interattivo (linea attesa EV, drawdown massimo), "fortuna vs EV", KPI, limiti e obiettivi, calendario del profitto giornaliero, schedine in corso, cicli attivi, promemoria per le giocate rimaste in corso da giorni.
 - **Staking**: puntata suggerita in base alla strategia scelta:
   - *Flat*: percentuale fissa del bankroll;
-  - *Kelly*: frazione configurabile (pieno, ½, ¼, 1/10) con tetto massimo;
-  - *Masaniello*: cicli con N eventi / K vincenti / quota media, puntate ricalcolate dopo ogni esito e sulla quota reale, griglia completa delle puntate.
+  - *Kelly*: frazione configurabile con tetto massimo; opzionale *Kelly con incertezza*, che avvicina la tua probabilità a quella della quota in base a quanto le tue stime hanno funzionato finora;
+  - *Unità a fiducia*: 1–10 unità, con l'unità ricalcolata a inizio mese o quando il bankroll varia di una soglia;
+  - *Profitto fisso*: puntata = obiettivo ÷ (quota − 1);
+  - *Masaniello*: cicli con N eventi / K vincenti / quota media, puntate ricalcolate dopo ogni esito e sulla quota reale;
+  - *Cicli progressivi*: scalata, Fibonacci, D'Alembert, Labouchère, sempre con budget, tetto alla puntata e arresto automatico;
+  - *Esposizione massima*: limite opzionale alla somma delle puntate in corso.
+- **Simulatore Monte Carlo**: confronta le strategie (martingala compresa) sugli stessi esiti casuali: bankroll mediano, scenari peggiori e migliori, probabilità di chiudere in utile, rischio di rovina, drawdown.
 - **Strumenti**: calcolatore Kelly, margine del bookmaker e quote eque, valore atteso (EV), surebet/dutching.
-- **Statistiche**: yield, ROI, win rate, drawdown massimo, serie, CLV (closing line value) e confronto tra profitto atteso e reale; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
-- **Gestione del rischio**: stop-loss giornaliero e settimanale con avviso.
+- **Statistiche**: yield, ROI, win rate, drawdown massimo, serie, CLV e confronto tra profitto atteso e reale; profitto mensile; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
+- **Gestione del rischio**: stop-loss giornaliero e settimanale, stop-win giornaliero, obiettivo mensile.
+- **Aspetto**: tema scuro predefinito, chiaro o automatico.
 - **Dati**: salvati nel browser; backup/ripristino JSON, esportazione CSV (compatibile con Excel in italiano), sincronizzazione opzionale tra dispositivi tramite un repository GitHub privato.
 
 ## Dove stanno i dati
@@ -45,4 +54,4 @@ Poi apri http://localhost:8765. Dopo aver pubblicato una nuova versione, aggiorn
 
 ---
 
-Gioca responsabilmente. Nessun metodo di staking crea un vantaggio: Kelly e Masaniello gestiscono il rischio, ma il risultato dipende solo dal valore delle tue giocate.
+Gioca responsabilmente. Nessun metodo di staking crea un vantaggio: Kelly, Masaniello e i cicli gestiscono il rischio (le progressioni lo aumentano), ma il risultato atteso dipende solo dal valore delle tue giocate. Il simulatore serve proprio a vederlo prima di rischiare denaro vero.

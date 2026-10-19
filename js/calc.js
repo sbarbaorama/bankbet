@@ -15,9 +15,18 @@ export function round2(x) {
 }
 
 // Profitto netto di una scommessa (0 se ancora in corso).
+// Con una freebet la puntata non è denaro tuo: se perdi non perdi nulla, se vinci incassi solo la vincita netta.
 export function betProfit(b) {
   const s = +b.stake || 0;
   const o = +b.odds || 0;
+  if (b.freebet) {
+    switch (b.status) {
+      case 'won': return s * (o - 1);
+      case 'half_won': return (s / 2) * (o - 1);
+      case 'cashout': return +b.payout || 0;
+      default: return 0;
+    }
+  }
   switch (b.status) {
     case 'won': return s * (o - 1);
     case 'lost': return -s;
@@ -30,6 +39,25 @@ export function betProfit(b) {
 
 export function isSettled(b) {
   return b.status && b.status !== 'pending';
+}
+
+// Puntata che esce davvero dal bankroll (0 per le freebet).
+export function realStake(b) {
+  return b.freebet ? 0 : +b.stake || 0;
+}
+
+// ---------- Multiple ----------
+export const LEG_STATUSES = { pending: 'In corso', won: 'Vinta', lost: 'Persa', void: 'Rimborsata' };
+
+export function legsOdds(legs) {
+  return legs.filter((l) => l.status !== 'void').reduce((a, l) => a * (+l.odds || 1), 1);
+}
+
+export function legsStatus(legs) {
+  if (legs.some((l) => l.status === 'lost')) return 'lost';
+  if (legs.some((l) => !l.status || l.status === 'pending')) return 'pending';
+  if (legs.every((l) => l.status === 'void')) return 'void';
+  return 'won';
 }
 
 // Kelly: p probabilità (0-1), odds quota decimale.
@@ -146,23 +174,27 @@ export function summarize(bets) {
   for (const b of settled) {
     const p = betProfit(b);
     profit += p;
-    if (b.status !== 'void') { staked += +b.stake; oddsSum += +b.odds; }
+    if (b.status !== 'void') { staked += realStake(b); oddsSum += +b.odds; }
     if (p > 0) wins++;
     if (+b.closingOdds > 1) { clvSum += +b.odds / +b.closingOdds - 1; clvN++; }
-    if (+b.prob > 0) { evSum += ((+b.prob / 100) * +b.odds - 1) * +b.stake; evN++; }
+    const e = +b.prob > 0 ? betExpected(b) : null;
+    if (e != null) { evSum += e; evN++; }
   }
   const pending = bets.filter((b) => !isSettled(b));
+  const fbProfit = settled.filter((b) => b.freebet).reduce((a, b) => a + betProfit(b), 0);
   return {
     count: bets.length,
     settled: settled.length,
     pending: pending.length,
-    pendingStake: pending.reduce((a, b) => a + (+b.stake || 0), 0),
+    pendingStake: pending.reduce((a, b) => a + realStake(b), 0),
     staked,
     profit,
-    yield: staked ? profit / staked : 0,
+    yield: staked ? (profit - fbProfit) / staked : 0, // le freebet sono escluse dallo yield
     winRate: counted.length ? wins / counted.length : 0,
     avgOdds: counted.length ? oddsSum / counted.length : 0,
-    avgStake: counted.length ? staked / counted.length : 0,
+    avgStake: counted.filter((b) => !b.freebet).length ? staked / counted.filter((b) => !b.freebet).length : 0,
+    freebetProfit: fbProfit,
+    freebetN: settled.filter((b) => b.freebet).length,
     clv: clvN ? clvSum / clvN : null,
     clvN,
     ev: evN ? evSum : null,
@@ -196,9 +228,9 @@ export function betExpected(b) {
   if (!isSettled(b) || b.status === 'void') return null;
   const s = +b.stake || 0;
   const o = +b.odds || 0;
-  if (+b.prob > 0) return ((+b.prob / 100) * o - 1) * s;
-  if (+b.closingOdds > 1) return (o / +b.closingOdds - 1) * s;
-  return null;
+  const p = +b.prob > 0 ? +b.prob / 100 : +b.closingOdds > 1 ? 1 / +b.closingOdds : null;
+  if (p == null) return null;
+  return b.freebet ? p * (o - 1) * s : (p * o - 1) * s;
 }
 
 // Fortuna rispetto all'atteso, solo sulle scommesse con una stima.
@@ -229,6 +261,7 @@ export function maxDrawdownRange(points) {
 export function bankrollSeries(bets, transactions) {
   const events = [];
   for (const t of transactions) {
+    if (t.type === 'transfer') continue;
     const d = t.type === 'withdrawal' ? -t.amount : +t.amount;
     events.push({ date: t.date, delta: d, ev: d, kind: 'tx', order: t.createdAt || 0 });
   }
