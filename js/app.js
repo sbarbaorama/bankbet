@@ -867,7 +867,7 @@ function openPaste(initial = '') {
     if (!found.length) { out.innerHTML = '<div class="hint">Non ho riconosciuto partita o quota in questo testo.</div>'; return; }
     out.innerHTML = `<div class="hint">${found.length === 1 ? 'Trovato un segnale' : `Trovati ${found.length} segnali: scegli quale registrare`}</div>` +
       found.map((p, i) => `<div class="suggest"><span><strong>${esc(p.event || 'Partita non riconosciuta')}</strong><br>
-        <span class="hint">${esc([SG.SOURCES[p.source], p.competition, [p.market, p.selection].filter(Boolean).join(': '), p.prob ? `prob. ${String(p.prob).replace('.', ',')}%` : '', p.odds ? `@${fmtOdds(p.odds)}` : '', p.date ? fmtDate(p.date) : ''].filter(Boolean).join(' · '))}</span></span>
+        <span class="hint">${esc([SG.SOURCES[p.source], p.legs ? `Multipla ×${p.legs.length}: ${p.legs.map((l) => l.selection).join(' + ')}` : '', p.competition, [p.market, p.selection].filter(Boolean).join(': '), p.prob ? `prob. ${String(p.prob).replace('.', ',')}%` : '', p.odds ? `@${fmtOdds(p.odds)}` : '', p.date ? fmtDate(p.date) : ''].filter(Boolean).join(' · '))}</span></span>
         <button type="button" class="btn small primary" data-use-signal="${i}">Registra</button></div>`).join('');
   };
   $('#pasteText').addEventListener('input', parse, dlgOn());

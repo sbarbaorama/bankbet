@@ -32,6 +32,20 @@ export function fromParams(params) {
   };
   const date = isoDate(g('date'));
   if (date) preset.date = date;
+  // Multipla: legs=[{"e":evento,"m":mercato,"s":scelta,"o":quota}, ...]
+  try {
+    const raw = JSON.parse(g('legs') || 'null');
+    if (Array.isArray(raw)) {
+      const legs = raw.slice(0, 20).map((l) => ({
+        event: clip(l.e, 120), market: clip(l.m, 60), selection: clip(l.s, 80),
+        odds: numOrEmpty(l.o) > 1 ? numOrEmpty(l.o) : '', status: 'pending',
+      })).filter((l) => l.event || l.selection);
+      if (legs.length >= 2) {
+        preset.legs = legs;
+        if (!preset.odds && legs.every((l) => l.odds)) preset.odds = Math.round(legs.reduce((a, l) => a * l.odds, 1) * 100) / 100;
+      }
+    }
+  } catch { /* parametro non valido: ignorato */ }
   for (const k of Object.keys(preset)) if (preset[k] === '') delete preset[k];
   return preset;
 }
@@ -44,6 +58,61 @@ export function parseText(raw) {
   if (link) return [fromParams(new URLSearchParams(link[1]))];
 
   const out = [];
+  const headDate = (text.match(/(\d{2})-(\d{2})-(\d{4})/) || []);
+  const day = headDate[3] ? `${headDate[3]}-${headDate[2]}-${headDate[1]}` : '';
+  // Righe "1) 18:00 Casa – Ospite" seguite da "SCELTA @1.85 · prob. 52%"
+  const legRe = /^\s*\d+\)\s*(\d{2}:\d{2})?\s*(.+?)\s+[–-]\s+(.+?)\s*$/;
+  const pickRe = /^\s*(.+?)\s+@\s*(\d+[.,]\d+)(?:.*?prob\.\s*([\d.,]+)%)?/;
+  const readLegs = (block) => {
+    const ls = block.split('\n');
+    const res = [];
+    for (let i = 0; i < ls.length; i++) {
+      const m = ls[i].match(legRe);
+      if (!m) continue;
+      let league = '', pick = null;
+      for (let j = i + 1; j < Math.min(i + 4, ls.length); j++) {
+        if (legRe.test(ls[j])) break;
+        const pm = ls[j].match(pickRe);
+        if (pm) { pick = pm; break; }
+        if (ls[j].trim() && !league) league = ls[j].trim();
+      }
+      if (!pick) continue;
+      res.push({ hour: m[1] || '', event: `${m[2].trim()} - ${m[3].trim()}`, league, selection: pick[1].trim(),
+        odds: numOrEmpty(pick[2]), prob: numOrEmpty(pick[3]) });
+    }
+    return res;
+  };
+  const marketOf = (sel) => (/^(Over|Under)/.test(sel) ? 'Over/Under' : /^(1|X|2)$/.test(sel) ? '1X2'
+    : /^(1X|X2|12)$/.test(sel) ? 'Doppia chance' : /^(Goal|No goal)$/i.test(sel) ? 'Goal/No goal' : '');
+
+  // --- Betwin: bolletta (una multipla per ogni versione ① ② ③)
+  if (/B O L L E T T A|🎫/.test(text)) {
+    const parts = text.split(/(?=^[①②③].*$)/m).slice(1);
+    for (const part of parts) {
+      const title = part.split('\n')[0].trim();
+      const legs = readLegs(part);
+      if (legs.length < 2) continue;
+      const tot = (part.match(/Quota totale\s*([\d.,]+)/) || [])[1];
+      const prob = (part.match(/probabilit[aà] stimata\s*([\d.,]+)%/) || [])[1];
+      out.push({
+        source: 'betwin', sport: 'Calcio', event: `Bolletta ${title}`, date: day,
+        odds: numOrEmpty(tot) || Math.round(legs.reduce((a, l) => a * (l.odds || 1), 1) * 100) / 100, prob: numOrEmpty(prob),
+        legs: legs.map((l) => ({ event: l.event, market: marketOf(l.selection), selection: l.selection, odds: l.odds, status: 'pending' })),
+        tags: 'betwin, bolletta', notes: `Orari: ${legs.map((l) => l.hour).filter(Boolean).join(', ')}`,
+      });
+    }
+    if (out.length) return out.map(clean);
+  }
+  // --- Betwin: singole del bankroll
+  if (/S I N G O L E|💰/.test(text)) {
+    for (const l of readLegs(text)) {
+      out.push({ source: 'betwin', sport: 'Calcio', event: l.event, competition: l.league, market: marketOf(l.selection),
+        selection: l.selection, odds: l.odds, prob: l.prob, date: day, tags: 'betwin, singola',
+        notes: l.hour ? `Calcio d'inizio ${l.hour}` : '' });
+    }
+    if (out.length) return out.map(clean);
+  }
+
   // --- TotalCorner: "⭐ Favorita che spinge" / "🔥 0-0 sotto pressione"
   const tcRe = /(Favorita che spinge|0-0 sotto pressione)/g;
   const tcStarts = [...text.matchAll(tcRe)].map((m) => m.index);
