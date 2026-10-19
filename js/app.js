@@ -124,6 +124,8 @@ const ui = {
   toolTab: 'kelly',
   statGroup: 'sport',
   openMasaniello: null,
+  homePeriod: '30',
+  calMonth: null,
 };
 
 const views = { home: renderHome, bets: renderBets, tools: renderTools, stats: renderStats, bankroll: renderBankroll };
@@ -136,6 +138,7 @@ function current() {
 function render() {
   const name = current();
   for (const a of $$('#tabs a')) a.classList.toggle('active', a.dataset.view === name);
+  document.body.classList.toggle('on-home', name === 'home');
   const scroll = window.scrollY;
   const focusId = document.activeElement?.id;
   views[name]();
@@ -156,12 +159,31 @@ function renderTop() {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 
 // ---------- HOME ----------
+const PERIODS = [['7', '7G', 7], ['30', '30G', 30], ['90', '3M', 90], ['365', 'Anno', 365], ['all', 'Tutto', 0]];
+const fmtOdds = (o) => (+o || 0).toFixed(2).replace('.', ',');
+const STRAT_LABEL = { flat: 'Flat', kelly: 'Kelly', masaniello: 'Masaniello' };
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 13 ? 'Buongiorno' : h < 18 ? 'Buon pomeriggio' : 'Buonasera';
+}
+
+function profitBetween(from, to = '9999-12-31') {
+  return store.get().bets
+    .filter((b) => C.isSettled(b) && (b.settledDate || b.date) >= from && (b.settledDate || b.date) <= to)
+    .reduce((a, b) => a + C.betProfit(b), 0);
+}
+
+function bigMoney(x) {
+  return `${fmt(x)} <span class="cur">${esc(store.get().settings.currency)}</span>`;
+}
+
 function renderHome() {
   const d = store.get();
   if (!d.transactions.length && !d.bets.length) {
     view.innerHTML = `
       <div class="card stack" style="max-width:520px;margin:24px auto">
-        <h2>Benvenuto in BankBet 👋</h2>
+        <h2>Benvenuto in BankBet</h2>
         <p class="muted" style="margin:0">Per iniziare imposta il bankroll iniziale: è la cifra che dedichi alle scommesse, separata dal resto delle tue finanze.</p>
         <label class="field">Bankroll iniziale (${esc(d.settings.currency)})
           <input id="initBank" inputmode="decimal" placeholder="es. 500">
@@ -173,54 +195,186 @@ function renderHome() {
   }
   const b = balances();
   const sum = C.summarize(d.bets);
-  const { points, maxDrawdown } = C.bankrollSeries(d.bets, d.transactions);
   const st = C.streaks(d.bets);
   const alerts = stopLossAlerts();
+  const series = C.bankrollSeries(d.bets, d.transactions);
+  const per = PERIODS.find((p) => p[0] === ui.homePeriod) || PERIODS[1];
+  const from = per[2] ? daysAgo(per[2] - 1) : '';
+
+  // Serie nel periodo, con la linea attesa riallineata all'inizio del periodo.
+  let pts = series.points;
+  if (from) {
+    const before = pts.filter((p) => p.date < from);
+    const start = before[before.length - 1];
+    pts = (start ? [{ ...start, date: from, t: Date.parse(from + 'T00:00:00') }] : []).concat(pts.filter((p) => p.date >= from));
+  }
+  if (pts.length) {
+    const off = pts[0].value - pts[0].ev;
+    pts = pts.map((p) => ({ ...p, ev: p.ev + off }));
+    const last = pts[pts.length - 1];
+    if (last.t < Date.now()) pts.push({ ...last, date: today(), t: Date.now() });
+  }
+  const dd = C.maxDrawdownRange(pts);
+  const windowBets = d.bets.filter((x) => C.isSettled(x) && (!from || (x.settledDate || x.date) >= from));
+  const lk = C.luck(windowBets);
+  const hasEst = d.bets.some((x) => C.betExpected(x) != null);
+  const todayP = profitBetween(today());
+  const todayN = d.bets.filter((x) => C.isSettled(x) && (x.settledDate || x.date) === today()).length;
+  const periodP = profitBetween(from || '0000-00-00');
   const pending = d.bets.filter((x) => !C.isSettled(x)).sort((a, z) => (a.date < z.date ? -1 : 1));
   const activeM = d.masaniello.map((m) => ({ m, ...masanielloInfo(m) })).filter((x) => x.state?.status === 'active');
-  const roi = b.deposited > 0 ? b.profit / b.deposited : 0;
+  const when = new Date().toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
+  const arrow = (x) => (x > 0.004 ? '▲ ' : x < -0.004 ? '▼ ' : '');
 
   view.innerHTML = `
     <div class="stack">
-      ${alerts.map((a) => `<div class="alert danger">${esc(a)}</div>`).join('')}
-      <div class="kpis">
-        ${kpi('Bankroll', money(b.balance), `disponibile ${money(b.available)}`)}
-        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, `ROI sul depositato ${pct(roi)}`)}
-        ${kpi('Yield', `<span class="${cls(sum.yield)}">${pct(sum.yield)}</span>`, `su ${money(sum.staked)} giocati`)}
-        ${kpi('Win rate', pct(sum.winRate), `${sum.settled} chiuse · quota media ${sum.avgOdds ? sum.avgOdds.toFixed(2) : '—'}`)}
-        ${kpi('In corso', `${sum.pending}`, `${money(sum.pendingStake)} in gioco`)}
-        ${kpi('Max drawdown', `<span class="${maxDrawdown > 0 ? 'neg' : ''}">${money(maxDrawdown)}</span>`, `serie attuale ${st.current}`)}
-      </div>
-      <div class="grid grid-2">
-        <div class="card"><h3>Andamento bankroll</h3><canvas class="chart" id="chBank"></canvas></div>
-        <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
-      </div>
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="spread"><h3>Scommesse in corso (${pending.length})</h3><a href="#bets" class="btn small ghost">Tutte</a></div>
-          ${pending.length ? `<div class="bet-list">${pending.slice(0, 8).map(betItem).join('')}</div>` : '<div class="empty">Nessuna scommessa in corso</div>'}
+      <div class="home-head">
+        <div><div class="when">${esc(when.charAt(0).toUpperCase() + when.slice(1))}</div><h1>${greeting()}</h1></div>
+        <div class="actions">
+          <button class="btn" data-action="export-csv">Esporta CSV</button>
+          <button class="btn primary" data-action="new-bet"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Nuova scommessa</button>
         </div>
-        <div class="card">
-          <div class="spread"><h3>Masaniello attivi</h3><a href="#tools" data-action="tool-tab" data-tab="masaniello" class="btn small ghost">Gestisci</a></div>
-          ${activeM.length ? activeM.map(({ m, state }) => `
-            <div class="stack" style="gap:6px;margin-bottom:14px">
-              <div class="spread"><strong>${esc(m.name)}</strong><span class="num">${money(state.capital)}</span></div>
-              <div class="progress"><div style="width:${(state.w / state.plan.K) * 100}%"></div></div>
-              <div class="spread hint"><span>${state.w}/${state.plan.K} vinte · ${state.losses}/${state.plan.N - state.plan.K} errori concessi</span>
-              <span>Prossima: <strong>${money(C.masanielloStake(state))}</strong> @${state.plan.q}</span></div>
-            </div>`).join('') : '<div class="empty">Nessun Masaniello attivo</div>'}
+      </div>
+      ${alerts.map((a) => `<div class="alert danger">${esc(a)}</div>`).join('')}
+      <div class="home-row">
+        <section class="card hero home-main" style="gap:0">
+          <div class="hero-top">
+            <div>
+              <div class="label-caps">Bankroll</div>
+              <div class="hero-value">${bigMoney(b.balance)}</div>
+              <div class="hero-pills">
+                <span class="pill ${cls(todayP)}">${todayN ? `${arrow(todayP)}${signed(todayP)} oggi` : 'Nessun esito oggi'}</span>
+                <span class="pill">${signed(periodP)} ${per[2] ? `in ${per[2] === 365 ? 'un anno' : per[2] + ' giorni'}` : 'in totale'}</span>
+              </div>
+            </div>
+            <div class="hero-tools">
+              <div class="seg" role="group" aria-label="Periodo">${PERIODS.map(([k, l]) => `<button class="${k === per[0] ? 'on' : ''}" data-action="home-period" data-period="${k}" aria-pressed="${k === per[0]}">${l}</button>`).join('')}</div>
+              <div class="legend">
+                <span><i></i>Bankroll reale</span>
+                ${hasEst ? '<span><i class="ev"></i>Atteso (EV)</span>' : ''}
+                ${dd.range ? '<span><i class="dd"></i>Drawdown max</span>' : ''}
+              </div>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas class="chart" id="chBank" role="img" aria-label="Andamento del bankroll nel periodo selezionato"></canvas></div>
+          <div class="hero-foot">
+            <div><div class="label-caps">Disponibile</div><div class="v">${money(b.available)}</div></div>
+            <div><div class="label-caps">In gioco</div><div class="v">${money(b.pendingStake)} <small class="muted">· ${pending.length} ${pending.length === 1 ? 'giocata' : 'giocate'}</small></div></div>
+            ${lk.n ? `<div title="Profitto reale meno profitto atteso, sulle ${lk.n} scommesse del periodo con probabilità stimata o quota di chiusura"><div class="label-caps">Fortuna vs EV</div><div class="v ${cls(lk.luck)}">${signed(lk.luck)}</div></div>` : ''}
+          </div>
+        </section>
+        <div class="home-side">
+          <div class="kpis two">
+            ${kpi('Yield', `<span class="${cls(sum.yield)}">${sum.yield > 0 ? '+' : ''}${pct(sum.yield)}</span>`, `su ${money(sum.staked)} giocati`)}
+            ${kpi('Win rate', pct(sum.winRate, 0), `${sum.settled} chiuse · q. media ${sum.avgOdds ? fmtOdds(sum.avgOdds) : '—'}`)}
+            ${kpi('CLV', sum.clv == null ? '—' : `<span class="${cls(sum.clv)}">${sum.clv > 0 ? '+' : ''}${pct(sum.clv)}</span>`, sum.clvN ? `su ${sum.clvN} scommesse` : 'aggiungi la quota di chiusura')}
+            ${kpi('Max drawdown', `<span class="${series.maxDrawdown > 0 ? 'neg' : ''}">${series.maxDrawdown > 0 ? '−' : ''}${money(series.maxDrawdown)}</span>`, `serie attuale ${st.current}`)}
+          </div>
+          ${limitsCard()}
+        </div>
+      </div>
+      <div class="home-row">
+        <section class="home-main">
+          <div class="card">
+            <div class="card-head"><h2>In corso <span class="muted" style="font-weight:400">· ${pending.length}</span></h2>${pending.length ? '<a href="#bets" data-action="show-pending">Tutte</a>' : ''}</div>
+            ${pending.length ? `<div class="bet-list">${pending.slice(0, 6).map(betItem).join('')}</div>` : '<div class="empty">Nessuna scommessa in corso. Tocca + per aggiungerne una.</div>'}
+          </div>
+        </section>
+        <div class="home-side">
+          ${calendarCard()}
+          <div class="card">
+            <div class="card-head"><span class="label-caps">Masaniello attivi</span><a href="#tools" data-action="tool-tab" data-tab="masaniello">Gestisci</a></div>
+            ${activeM.length ? activeM.map(masanielloMini).join('') : '<div class="hint">Nessun Masaniello attivo.</div>'}
+          </div>
         </div>
       </div>
     </div>`;
 
-  lineChart($('#chBank'), points.map((p) => ({ value: p.value, label: fmtDate(p.date) })), { emptyText: 'Servono almeno due movimenti' });
-  const months = new Map();
-  for (const x of d.bets.filter(C.isSettled)) {
-    const k = (x.settledDate || x.date).slice(0, 7);
-    months.set(k, (months.get(k) || 0) + C.betProfit(x));
+  lineChart($('#chBank'), pts, {
+    emptyText: 'Nessun movimento nel periodo',
+    fmtValue: money,
+    ddRange: dd.maxDrawdown > 0 ? dd.range : null,
+    fmtDate: (t) => new Date(t).toLocaleDateString('it-IT', per[2] > 90 || !per[2] ? { month: 'short', year: '2-digit' } : { day: 'numeric', month: 'short' }),
+  });
+}
+
+function limitsCard() {
+  const s = store.get().settings;
+  if (!(s.dailyStopLoss > 0) && !(s.weeklyStopLoss > 0)) {
+    return `<div class="card"><div class="card-head"><span class="label-caps">Limiti di perdita</span><a href="#bankroll">Imposta</a></div>
+      <div class="hint">Nessun limite impostato. Uno stop-loss giornaliero o settimanale ti aiuta a fermarti nelle giornate storte.</div></div>`;
   }
-  const bars = [...months.entries()].sort().slice(-12).map(([k, v]) => ({ label: k.slice(5) + '/' + k.slice(2, 4), value: v }));
-  barChart($('#chMonth'), bars, { emptyText: 'Nessuna scommessa chiusa' });
+  const meter = (label, used, limit) => {
+    const w = Math.min(100, (used / limit) * 100);
+    return `<div class="meter ${used >= limit ? 'over' : ''}">
+      <div class="top"><span>${label}</span><span class="big-num">${fmt(used)} / ${money(limit)}</span></div>
+      <div class="bar" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(w)}"><div style="width:${w}%"></div></div></div>`;
+  };
+  return `<div class="card"><div class="card-head"><span class="label-caps">Limiti di perdita</span><a href="#bankroll">Modifica</a></div>
+    ${s.dailyStopLoss > 0 ? meter('Oggi', lossSince(today()), s.dailyStopLoss) : ''}
+    ${s.weeklyStopLoss > 0 ? meter('Ultimi 7 giorni', lossSince(daysAgo(6)), s.weeklyStopLoss) : ''}</div>`;
+}
+
+function calendarCard() {
+  const nowMonth = today().slice(0, 7);
+  const base = ui.calMonth || nowMonth;
+  const [Y, M] = base.split('-').map(Number);
+  const first = new Date(Y, M - 1, 1);
+  const days = new Date(Y, M, 0).getDate();
+  const lead = (first.getDay() + 6) % 7;
+  const daily = new Map();
+  for (const x of store.get().bets) {
+    if (!C.isSettled(x)) continue;
+    const k = x.settledDate || x.date;
+    if (k.slice(0, 7) === base) daily.set(k, (daily.get(k) || 0) + C.betProfit(x));
+  }
+  const maxAbs = Math.max(0, ...[...daily.values()].map(Math.abs));
+  const total = [...daily.values()].reduce((a, v) => a + v, 0);
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push('<div class="day out" aria-hidden="true"></div>');
+  for (let dd = 1; dd <= days; dd++) {
+    const iso = `${base}-${String(dd).padStart(2, '0')}`;
+    const v = daily.get(iso);
+    let c = '', tip = 'Nessuna giocata chiusa';
+    if (iso > today()) { c = 'future'; tip = ''; }
+    else if (v != null) {
+      const strong = maxAbs > 0 && Math.abs(v) >= maxAbs / 2 ? 2 : 1;
+      c = v > 0.004 ? `p${strong}` : v < -0.004 ? `n${strong}` : '';
+      tip = signed(v);
+    }
+    if (iso === today()) c += ' today';
+    cells.push(`<div class="day ${c}" title="${esc(fmtDate(iso) + (tip ? ' · ' + tip : ''))}">${dd}</div>`);
+  }
+  while (cells.length % 7) cells.push('<div class="day out" aria-hidden="true"></div>');
+  const label = first.toLocaleDateString('it-IT', { month: 'long', year: base.slice(0, 4) === nowMonth.slice(0, 4) ? undefined : 'numeric' });
+  return `<div class="card">
+    <div class="card-head">
+      <div><div class="label-caps">${esc(label)}</div><div class="big-num ${cls(total)}" style="font-size:1.25rem;font-weight:600;white-space:nowrap">${signed(total)}</div></div>
+      <div class="cal-nav">
+        <button data-action="cal-move" data-step="-1" aria-label="Mese precedente">‹</button>
+        <button data-action="cal-move" data-step="1" aria-label="Mese successivo" ${base >= nowMonth ? 'disabled' : ''}>›</button>
+      </div>
+    </div>
+    <div class="cal">${['L', 'M', 'M', 'G', 'V', 'S', 'D'].map((x) => `<div class="dow">${x}</div>`).join('')}${cells.join('')}</div>
+    <div class="cal-legend"><span>perdita</span><i style="background:var(--heat-neg2)"></i><i style="background:var(--heat-neg1)"></i><i style="background:var(--heat-0)"></i><i style="background:var(--heat-pos1)"></i><i style="background:var(--heat-pos2)"></i><span>vincita</span></div>
+  </div>`;
+}
+
+function masanielloMini({ m, state }) {
+  const { plan } = state;
+  const seq = state.history.filter((h) => h !== 'V');
+  const cells = [];
+  for (let i = 0; i < plan.N; i++) {
+    if (i < seq.length) cells.push(`<span class="${seq[i]}">${seq[i] === 'W' ? 'V' : 'P'}</span>`);
+    else if (i === seq.length) cells.push(`<span class="cur">${i + 1}</span>`);
+    else cells.push(`<span class="next">${i + 1}</span>`);
+  }
+  return `<div class="mcard">
+    <div class="spread"><strong>${esc(m.name)}</strong><span class="big-num" style="font-size:1.25rem;font-weight:600">${money(state.capital)}</span></div>
+    <div class="mpath" aria-label="Esiti del ciclo">${cells.join('')}</div>
+    <div class="spread hint"><span>${state.w}/${plan.K} vinte · ${state.losses}/${plan.N - plan.K} errori</span>
+    <span>Prossima <strong class="big-num" style="font-size:1.05rem;color:var(--text)">${money(C.masanielloStake(state))}</strong> @${fmtOdds(plan.q)}</span></div>
+  </div>`;
 }
 
 function kpi(label, value, sub) {
@@ -228,22 +382,25 @@ function kpi(label, value, sub) {
 }
 
 function betItem(b) {
+  const settled = C.isSettled(b);
   const p = C.betProfit(b);
-  const meta = [b.sport, [b.market, b.selection].filter(Boolean).join(': '), b.bookmaker].filter(Boolean).join(' · ');
+  const head = [b.sport, b.competition, fmtDate(b.date)].filter(Boolean).join(' · ');
+  const pick = [[b.market, b.selection].filter(Boolean).join(': '), b.bookmaker].filter(Boolean).join(' · ');
+  const strat = STRAT_LABEL[b.strategy] || '';
   return `
-    <div class="bet" data-action="edit-bet" data-id="${b.id}">
-      <div style="min-width:0">
-        <div class="title">${esc(b.event || b.selection || 'Scommessa')}</div>
-        <div class="meta">${fmtDate(b.date)}${meta ? ' · ' + esc(meta) : ''}</div>
+    <div class="bet ${settled ? 'settled' : ''}" data-action="edit-bet" data-id="${b.id}">
+      <div class="t-head"><span>${esc(head)}</span><span class="chips">${strat ? `<span class="chip strat">${strat}</span>` : ''}<span class="chip ${b.status}">${C.STATUSES[b.status]}</span></span></div>
+      <div class="t-body">
+        <div style="min-width:0"><div class="title">${esc(b.event || b.selection || 'Scommessa')}</div>${pick ? `<div class="pick">${esc(pick)}</div>` : ''}</div>
+        <div class="odds">${fmtOdds(b.odds)}</div>
       </div>
-      <div class="amount">
-        <div>${C.isSettled(b) ? `<span class="${cls(p)}">${signed(p)}</span>` : money(b.stake)}</div>
-        <div class="meta">@${(+b.odds).toFixed(2)} · <span class="chip ${b.status}">${C.STATUSES[b.status]}</span></div>
-      </div>
-      ${!C.isSettled(b) ? `<div class="quick">
-        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="won">✓ Vinta</button>
-        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="lost">✗ Persa</button>
-        <button class="btn small" data-action="settle" data-id="${b.id}" data-status="void">↺ Rimborsata</button>
+      <div class="t-foot"><span>Puntata <b>${money(b.stake)}</b></span>${settled
+        ? `<span>Esito <b class="${cls(p)}">${signed(p)}</b></span>`
+        : `<span>Vincita <b>${money((+b.stake || 0) * (+b.odds || 0))}</b></span>`}</div>
+      ${!settled ? `<div class="quick">
+        <button class="btn ok" data-action="settle" data-id="${b.id}" data-status="won">✓ Vinta</button>
+        <button class="btn ko" data-action="settle" data-id="${b.id}" data-status="lost">✕ Persa</button>
+        <button class="btn vd" data-action="settle" data-id="${b.id}" data-status="void">↺ Rimb.</button>
       </div>` : ''}
     </div>`;
 }
@@ -283,7 +440,7 @@ function renderBets() {
   }).join('');
   view.innerHTML = `
     <div class="stack">
-      <div class="spread"><h2>Scommesse</h2>
+      <div class="spread"><h2>Schedine</h2>
         <div class="row"><button class="btn small" data-action="export-csv">Esporta CSV</button>
         <button class="btn small primary" data-action="new-bet">+ Nuova</button></div></div>
       <div class="filters">
@@ -747,6 +904,7 @@ function renderStats() {
         ${kpi('CLV medio', s.clv == null ? '—' : `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, s.clvN ? `su ${s.clvN} scommesse` : 'inserisci la quota di chiusura')}
         ${kpi('Max drawdown', money(maxDrawdown), 'dal picco di profitto')}
       </div>
+      <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
       ${withProb.length ? `<div class="card"><h3>Le tue stime funzionano?</h3>
         <p class="hint" style="margin:0">Sulle ${withProb.length} scommesse con probabilità stimata, il profitto atteso era <strong>${signed(s.ev)}</strong>, quello reale <strong class="${cls(actualProb)}">${signed(actualProb)}</strong>.
         Con pochi campioni la varianza domina: valuta il dato dopo almeno 200–300 scommesse. Il CLV positivo è l'indicatore più rapido di un vantaggio reale.</p></div>` : ''}
@@ -758,6 +916,13 @@ function renderStats() {
         </table></div>` : '<div class="empty">Nessuna scommessa chiusa</div>'}
       </div>
     </div>`;
+  const months = new Map();
+  for (const x of bets.filter(C.isSettled)) {
+    const k = (x.settledDate || x.date).slice(0, 7);
+    months.set(k, (months.get(k) || 0) + C.betProfit(x));
+  }
+  const bars = [...months.entries()].sort().slice(-12).map(([k, v]) => ({ label: k.slice(5) + '/' + k.slice(2, 4), value: v }));
+  barChart($('#chMonth'), bars, { emptyText: 'Nessuna scommessa chiusa' });
 }
 
 // ---------- BANKROLL / IMPOSTAZIONI ----------
@@ -767,7 +932,7 @@ function renderBankroll() {
   const b = balances();
   const cfg = sync.getConfig();
   const txs = d.transactions.slice().sort((a, z) => (a.date < z.date ? 1 : -1));
-  const theme = localStorage.getItem('bankbet.theme') || 'auto';
+  const theme = localStorage.getItem('bankbet.theme') || 'dark';
   view.innerHTML = `
     <div class="stack">
       <h2>Bankroll e impostazioni</h2>
@@ -842,7 +1007,7 @@ function renderBankroll() {
           </div>
           <input type="file" id="importFile" accept="application/json,.json" hidden>
           <label class="field">Tema
-            <select id="themeSel">${[['auto', 'Automatico'], ['light', 'Chiaro'], ['dark', 'Scuro']].map(([k, l]) => `<option value="${k}" ${theme === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+            <select id="themeSel">${[['dark', 'Scuro'], ['light', 'Chiaro'], ['auto', 'Automatico (come il sistema)']].map(([k, l]) => `<option value="${k}" ${theme === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
           <div class="hint">I dati sono salvati nel browser di questo dispositivo. Senza sincronizzazione, esporta periodicamente un backup.</div>
           <button class="btn danger" data-action="reset">Cancella tutti i dati locali</button>
         </div>
@@ -896,6 +1061,18 @@ const actions = {
     toast(`Esito: ${C.STATUSES[el.dataset.status]}`);
   },
   'more-bets'() { ui.betLimit += 100; render(); },
+  'home-period'(el) { ui.homePeriod = el.dataset.period; render(); },
+  'cal-move'(el) {
+    const [y, m] = (ui.calMonth || today().slice(0, 7)).split('-').map(Number);
+    const d = new Date(y, m - 1 + +el.dataset.step, 1);
+    const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    ui.calMonth = k >= today().slice(0, 7) ? null : k;
+    render();
+  },
+  'show-pending'() {
+    ui.betFilter = { q: '', status: 'pending', sport: '', period: '' };
+    if (current() === 'bets') render(); else location.hash = 'bets';
+  },
   'export-csv': exportCSV,
   'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
   'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
@@ -1004,12 +1181,22 @@ window.addEventListener('online', () => sync.getConfig().auto && runSync(false))
 // ---------- Tema / avvio ----------
 function applyTheme() {
   const t = localStorage.getItem('bankbet.theme');
-  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  if (t === 'light' || t === 'auto') document.documentElement.dataset.theme = t;
   else delete document.documentElement.dataset.theme;
+  const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  if (bg) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', bg);
 }
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render());
-let resizeT;
-window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (current() === 'home') render(); }, 150); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { applyTheme(); render(); });
+// Ridisegna i grafici solo quando cambia la larghezza (non per la barra degli indirizzi su mobile).
+let resizeT, lastW = window.innerWidth;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeT);
+  resizeT = setTimeout(() => {
+    if (window.innerWidth === lastW) return;
+    lastW = window.innerWidth;
+    if (current() === 'home' || current() === 'stats') render();
+  }, 150);
+});
 
 applyTheme();
 render();

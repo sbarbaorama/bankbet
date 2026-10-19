@@ -190,28 +190,70 @@ export function oddsBucket(o) {
   return '5.00+';
 }
 
-// Serie temporale del bankroll (movimenti + scommesse chiuse) e drawdown massimo.
+// Profitto atteso di una scommessa chiusa: dalla probabilità stimata o, in mancanza,
+// dalla quota di chiusura (CLV). null se non c'è una stima.
+export function betExpected(b) {
+  if (!isSettled(b) || b.status === 'void') return null;
+  const s = +b.stake || 0;
+  const o = +b.odds || 0;
+  if (+b.prob > 0) return ((+b.prob / 100) * o - 1) * s;
+  if (+b.closingOdds > 1) return (o / +b.closingOdds - 1) * s;
+  return null;
+}
+
+// Fortuna rispetto all'atteso, solo sulle scommesse con una stima.
+export function luck(bets) {
+  let actual = 0, expected = 0, n = 0;
+  for (const b of bets) {
+    const e = betExpected(b);
+    if (e == null) continue;
+    actual += betProfit(b);
+    expected += e;
+    n++;
+  }
+  return { n, actual, expected, luck: actual - expected };
+}
+
+// Drawdown massimo (sul profitto cumulato) di una serie di punti, con l'intervallo picco → minimo.
+export function maxDrawdownRange(points) {
+  let peak = -Infinity, peakT = null, best = 0, range = null;
+  for (const p of points) {
+    if (p.profit > peak) { peak = p.profit; peakT = p.t; }
+    const dd = peak - p.profit;
+    if (dd > best) { best = dd; range = { t0: peakT, t1: p.t }; }
+  }
+  return { maxDrawdown: best, range };
+}
+
+// Serie temporale del bankroll (movimenti + scommesse chiuse), con linea attesa e drawdown massimo.
 export function bankrollSeries(bets, transactions) {
   const events = [];
   for (const t of transactions) {
-    events.push({ date: t.date, delta: t.type === 'withdrawal' ? -t.amount : +t.amount, kind: 'tx' });
+    const d = t.type === 'withdrawal' ? -t.amount : +t.amount;
+    events.push({ date: t.date, delta: d, ev: d, kind: 'tx', order: t.createdAt || 0 });
   }
   for (const b of bets.filter(isSettled)) {
-    events.push({ date: b.settledDate || b.date, delta: betProfit(b), kind: 'bet' });
+    const p = betProfit(b);
+    const e = betExpected(b);
+    events.push({ date: b.settledDate || b.date, delta: p, ev: e == null ? p : e, kind: 'bet', order: b.updatedAt || b.createdAt || 0 });
   }
-  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  let bal = 0, peakProfit = 0, cumProfit = 0, maxDD = 0;
+  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.order - b.order));
+  const perDay = new Map();
+  for (const e of events) perDay.set(e.date, (perDay.get(e.date) || 0) + 1);
+  const seen = new Map();
+  let bal = 0, evBal = 0, cumProfit = 0;
   const points = [];
   for (const e of events) {
     bal += e.delta;
-    if (e.kind === 'bet') {
-      cumProfit += e.delta;
-      peakProfit = Math.max(peakProfit, cumProfit);
-      maxDD = Math.max(maxDD, peakProfit - cumProfit);
-    }
-    points.push({ date: e.date, value: bal, profit: cumProfit });
+    evBal += e.ev;
+    if (e.kind === 'bet') cumProfit += e.delta;
+    const k = seen.get(e.date) || 0;
+    seen.set(e.date, k + 1);
+    const t = Date.parse(e.date + 'T00:00:00') + ((k + 1) * 864e5) / (perDay.get(e.date) + 1);
+    points.push({ date: e.date, t, value: bal, ev: evBal, profit: cumProfit });
   }
-  return { points, maxDrawdown: maxDD };
+  const { maxDrawdown, range } = maxDrawdownRange(points);
+  return { points, maxDrawdown, ddRange: range };
 }
 
 export function streaks(bets) {

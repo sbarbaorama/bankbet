@@ -1,17 +1,34 @@
-// Grafici minimi su canvas (linea e barre), con supporto HiDPI e tema.
+// Grafici su canvas (linea interattiva e barre), con supporto HiDPI e tema.
+
+const FONT = '"IBM Plex Sans", system-ui, sans-serif';
 
 function setup(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   const css = getComputedStyle(document.documentElement);
   const color = (n) => css.getPropertyValue(n).trim();
   return { ctx, w, h, color };
+}
+
+// Converte qualunque colore CSS in rgba() con l'opacità indicata (funziona anche con rgb(), hsl(), nomi).
+function rgba(ctx, color, a) {
+  ctx.fillStyle = '#000';
+  ctx.fillStyle = color;
+  const c = ctx.fillStyle;
+  if (c[0] === '#') {
+    const n = parseInt(c.slice(1, 7), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  const m = c.match(/[\d.]+/g);
+  return m ? `rgba(${m[0]},${m[1]},${m[2]},${a})` : color;
 }
 
 function niceTicks(min, max, count = 4) {
@@ -29,13 +46,200 @@ function niceTicks(min, max, count = 4) {
 
 function fmtTick(v) {
   const a = Math.abs(v);
-  if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (a >= 1e6) return (v / 1e6).toFixed(1).replace('.', ',') + 'M';
   if (a >= 1e4) return (v / 1e3).toFixed(0) + 'k';
-  return Math.round(v * 100) / 100 + '';
+  return (Math.round(v * 100) / 100).toLocaleString('it-IT');
 }
 
-function axes(ctx, w, h, pad, ticks, y, color) {
-  ctx.font = '11px system-ui, sans-serif';
+function emptyMsg(ctx, w, h, color, text) {
+  ctx.fillStyle = color('--muted');
+  ctx.font = `13px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, w / 2, h / 2);
+}
+
+function tipEl(canvas) {
+  const wrap = canvas.parentElement;
+  let tip = wrap.querySelector(':scope > .chart-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'chart-tip';
+    tip.hidden = true;
+    wrap.append(tip);
+  }
+  return tip;
+}
+
+/**
+ * Grafico a linea su asse temporale.
+ * points: [{ t: ms, value, ev? }]
+ * opts: { emptyText, fmtValue(v), fmtDate(t), fmtTipDate(t), ddRange: {t0, t1}, compact }
+ */
+export function lineChart(canvas, points, opts = {}) {
+  canvas._lc = { points, opts };
+  if (!canvas._lcBound) {
+    canvas._lcBound = true;
+    const move = (e) => {
+      const r = canvas.getBoundingClientRect();
+      drawLine(canvas, e.clientX - r.left);
+    };
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerdown', move);
+    canvas.addEventListener('pointerleave', () => drawLine(canvas, null));
+  }
+  drawLine(canvas, null);
+}
+
+function drawLine(canvas, hoverX) {
+  const { points, opts } = canvas._lc;
+  const { ctx, w, h, color } = setup(canvas);
+  const tip = tipEl(canvas);
+  if (points.length < 2) {
+    tip.hidden = true;
+    emptyMsg(ctx, w, h, color, opts.emptyText || 'Nessun dato');
+    return;
+  }
+  const compact = opts.compact ?? w < 480;
+  const pad = compact ? { l: 4, r: 8, t: 10, b: 20 } : { l: 54, r: 12, t: 12, b: 26 };
+  const hasEv = points.some((p) => p.ev != null && Math.abs(p.ev - p.value) > 1e-9);
+  const vals = points.map((p) => p.value).concat(hasEv ? points.map((p) => p.ev ?? p.value) : []);
+  const ticks = niceTicks(Math.min(...vals), Math.max(...vals));
+  const ymin = ticks[0], ymax = ticks[ticks.length - 1];
+  const t0 = points[0].t;
+  const t1 = points[points.length - 1].t > t0 ? points[points.length - 1].t : t0 + 1;
+  const x = (t) => pad.l + ((t - t0) / (t1 - t0)) * (w - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - ymin) / (ymax - ymin)) * (h - pad.t - pad.b);
+  const fmtDate = opts.fmtDate || ((t) => new Date(t).toLocaleDateString('it-IT', { day: 'numeric', month: 'short' }));
+
+  // Griglia ed etichette asse Y
+  ctx.font = `11px ${FONT}`;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color('--grid');
+  ctx.fillStyle = color('--muted');
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const tk of ticks) {
+    const py = Math.round(y(tk)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(w - pad.r, py);
+    ctx.stroke();
+    if (!compact) ctx.fillText(fmtTick(tk), pad.l - 8, py);
+  }
+
+  // Banda del drawdown massimo
+  if (opts.ddRange && opts.ddRange.t1 > opts.ddRange.t0) {
+    ctx.fillStyle = rgba(ctx, color('--neg'), 0.12);
+    const a = x(Math.max(t0, opts.ddRange.t0)), b = x(Math.min(t1, opts.ddRange.t1));
+    ctx.fillRect(a, pad.t, Math.max(2, b - a), h - pad.t - pad.b);
+  }
+
+  // Etichette asse X (date)
+  ctx.fillStyle = color('--muted');
+  ctx.textBaseline = 'top';
+  const nLabels = compact ? 2 : Math.max(2, Math.min(6, Math.floor((w - pad.l) / 110)));
+  for (let i = 0; i < nLabels; i++) {
+    const t = t0 + ((t1 - t0) * i) / (nLabels - 1);
+    ctx.textAlign = i === 0 ? 'left' : i === nLabels - 1 ? 'right' : 'center';
+    ctx.fillText(fmtDate(t), x(t), h - pad.b + 8);
+  }
+
+  const accent = color('--accent');
+  const path = (key) => {
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const v = key === 'ev' ? (p.ev ?? p.value) : p.value;
+      if (i) ctx.lineTo(x(p.t), y(v)); else ctx.moveTo(x(p.t), y(v));
+    });
+  };
+
+  // Area sotto la linea reale
+  const grad = ctx.createLinearGradient(0, pad.t, 0, h - pad.b);
+  grad.addColorStop(0, rgba(ctx, accent, 0.26));
+  grad.addColorStop(1, rgba(ctx, accent, 0));
+  path('value');
+  ctx.lineTo(x(points[points.length - 1].t), h - pad.b);
+  ctx.lineTo(x(points[0].t), h - pad.b);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Linea attesa (EV)
+  if (hasEv) {
+    path('ev');
+    ctx.setLineDash([6, 5]);
+    ctx.strokeStyle = color('--ev');
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Linea reale
+  path('value');
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  const dot = (p, r) => {
+    ctx.beginPath();
+    ctx.arc(x(p.t), y(p.value), r, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = color('--surface');
+    ctx.stroke();
+  };
+
+  if (hoverX == null) {
+    dot(points[points.length - 1], 4.5);
+    tip.hidden = true;
+    return;
+  }
+
+  // Punto più vicino al cursore
+  let best = 0, bestD = Infinity;
+  points.forEach((p, i) => {
+    const d = Math.abs(x(p.t) - hoverX);
+    if (d <= bestD) { bestD = d; best = i; }
+  });
+  const p = points[best];
+  const px = x(p.t);
+  ctx.beginPath();
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = color('--faint');
+  ctx.lineWidth = 1;
+  ctx.moveTo(Math.round(px) + 0.5, pad.t);
+  ctx.lineTo(Math.round(px) + 0.5, h - pad.b);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (hasEv && p.ev != null) {
+    ctx.beginPath();
+    ctx.arc(px, y(p.ev), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = color('--ev');
+    ctx.fill();
+  }
+  dot(p, 5);
+
+  const fv = opts.fmtValue || ((v) => v.toFixed(2));
+  const fd = opts.fmtTipDate || ((t) => new Date(t).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'long' }));
+  tip.innerHTML = `<div class="d">${fd(p.t)}</div><b>${fv(p.value)}</b>${hasEv && p.ev != null ? `<div class="e">atteso ${fv(p.ev)}</div>` : ''}`;
+  tip.hidden = false;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
+}
+
+export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
+  const { ctx, w, h, color } = setup(canvas);
+  if (!bars.length) { emptyMsg(ctx, w, h, color, emptyText); return; }
+  const pad = { l: 54, r: 12, t: 12, b: 24 };
+  const vals = bars.map((b) => b.value);
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
+  const ymin = ticks[0], ymax = ticks[ticks.length - 1];
+  const y = (v) => pad.t + (1 - (v - ymin) / (ymax - ymin)) * (h - pad.t - pad.b);
+  ctx.font = `11px ${FONT}`;
   ctx.fillStyle = color('--muted');
   ctx.strokeStyle = color('--grid');
   ctx.lineWidth = 1;
@@ -47,70 +251,8 @@ function axes(ctx, w, h, pad, ticks, y, color) {
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
     ctx.stroke();
-    ctx.fillText(fmtTick(t), pad.l - 6, py);
+    ctx.fillText(fmtTick(t), pad.l - 8, py);
   }
-}
-
-export function lineChart(canvas, points, { emptyText = 'Nessun dato' } = {}) {
-  const { ctx, w, h, color } = setup(canvas);
-  if (points.length < 2) {
-    ctx.fillStyle = color('--muted');
-    ctx.font = '13px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(emptyText, w / 2, h / 2);
-    return;
-  }
-  const pad = { l: 48, r: 12, t: 12, b: 22 };
-  const vals = points.map((p) => p.value);
-  const ticks = niceTicks(Math.min(...vals), Math.max(...vals));
-  const ymin = ticks[0], ymax = ticks[ticks.length - 1];
-  const x = (i) => pad.l + (i / (points.length - 1)) * (w - pad.l - pad.r);
-  const y = (v) => pad.t + (1 - (v - ymin) / (ymax - ymin)) * (h - pad.t - pad.b);
-  axes(ctx, w, h, pad, ticks, y, color);
-
-  // Etichette data (prima e ultima)
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = color('--muted');
-  ctx.textAlign = 'left';
-  ctx.fillText(points[0].label || '', pad.l, h - pad.b + 6);
-  ctx.textAlign = 'right';
-  ctx.fillText(points[points.length - 1].label || '', w - pad.r, h - pad.b + 6);
-
-  const accent = color('--accent');
-  const grad = ctx.createLinearGradient(0, pad.t, 0, h - pad.b);
-  grad.addColorStop(0, accent + '55');
-  grad.addColorStop(1, accent + '00');
-  ctx.beginPath();
-  points.forEach((p, i) => (i ? ctx.lineTo(x(i), y(p.value)) : ctx.moveTo(x(i), y(p.value))));
-  ctx.lineTo(x(points.length - 1), h - pad.b);
-  ctx.lineTo(x(0), h - pad.b);
-  ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  ctx.beginPath();
-  points.forEach((p, i) => (i ? ctx.lineTo(x(i), y(p.value)) : ctx.moveTo(x(i), y(p.value))));
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-}
-
-export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
-  const { ctx, w, h, color } = setup(canvas);
-  if (!bars.length) {
-    ctx.fillStyle = color('--muted');
-    ctx.font = '13px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(emptyText, w / 2, h / 2);
-    return;
-  }
-  const pad = { l: 48, r: 12, t: 12, b: 22 };
-  const vals = bars.map((b) => b.value);
-  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
-  const ymin = ticks[0], ymax = ticks[ticks.length - 1];
-  const y = (v) => pad.t + (1 - (v - ymin) / (ymax - ymin)) * (h - pad.t - pad.b);
-  axes(ctx, w, h, pad, ticks, y, color);
   const slot = (w - pad.l - pad.r) / bars.length;
   const bw = Math.max(2, Math.min(36, slot * 0.7));
   const showEvery = Math.ceil(bars.length / Math.max(1, Math.floor((w - pad.l) / 48)));
@@ -120,10 +262,13 @@ export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
     const cx = pad.l + slot * i + slot / 2;
     const y0 = y(0), y1 = y(b.value);
     ctx.fillStyle = b.value >= 0 ? color('--pos') : color('--neg');
-    ctx.fillRect(cx - bw / 2, Math.min(y0, y1), bw, Math.max(1, Math.abs(y1 - y0)));
+    const top = Math.min(y0, y1), hh = Math.max(1, Math.abs(y1 - y0));
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(cx - bw / 2, top, bw, hh, 3); else ctx.rect(cx - bw / 2, top, bw, hh);
+    ctx.fill();
     if (i % showEvery === 0) {
       ctx.fillStyle = color('--muted');
-      ctx.fillText(b.label, cx, h - pad.b + 6);
+      ctx.fillText(b.label, cx, h - pad.b + 8);
     }
   });
 }
