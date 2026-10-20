@@ -649,7 +649,11 @@ function datalist(id, field) {
 
 // ---------- Menù a tendina con "Altro" (sport, bookmaker) ----------
 const OTHER = '__altro';
-const LISTS = { sports: { def: 'defaultSport', title: 'Sport' }, bookmakers: { def: 'defaultBookmaker', title: 'Bookmaker' } };
+const LISTS = {
+  sports: { def: 'defaultSport', title: 'Sport' },
+  markets: { def: 'defaultMarket', title: 'Mercato' },
+  bookmakers: { def: 'defaultBookmaker', title: 'Bookmaker' },
+};
 
 function listOf(key) {
   const l = store.get().settings[key];
@@ -663,9 +667,9 @@ function defaultOf(key) {
 }
 
 // Menù con le voci della lista più "Altro"; un valore non in elenco apre "Altro" già compilato.
-function choiceField(label, name, list, value, placeholder) {
+function choiceField(label, name, list, value, placeholder, cls = '') {
   const isOther = value != null && !list.includes(value);
-  return `<div class="field-stack">
+  return `<div class="field-stack ${cls}">
     <label class="field">${label}
       <select name="${name}Sel" data-choice="${name}">${list.map((x) => `<option ${x === value ? 'selected' : ''}>${esc(x)}</option>`).join('')}
         <option value="${OTHER}" ${isOther ? 'selected' : ''}>Altro</option></select></label>
@@ -701,7 +705,7 @@ function openBet(id, preset = {}) {
   const existing = id ? d.bets.find((b) => b.id === id) : null;
   const b = existing || {
     date: today(), status: 'pending', strategy: d.settings.lastStrategy || 'flat',
-    sport: defaultOf('sports'), bookmaker: defaultOf('bookmakers'), ...preset,
+    sport: defaultOf('sports'), market: defaultOf('markets'), bookmaker: defaultOf('bookmakers'), ...preset,
   };
   const activeM = d.masaniello.filter((m) => masanielloInfo(m).state?.status === 'active' || m.id === b.masanielloId);
   const activeC = d.cycles.filter((c) => cycleInfo(c).state.status === 'active' || c.id === b.cycleId);
@@ -722,7 +726,7 @@ function openBet(id, preset = {}) {
         <div class="legs">${legsInit.map(legRow).join('')}</div>
         <button type="button" class="btn small" data-leg-add>+ Selezione</button>
       </div>
-      <label class="field single">Mercato<input name="market" list="dlMarket" value="${isMulti ? '' : v('market')}" placeholder="1X2"></label>
+      ${choiceField('Mercato', 'market', listOf('markets'), isMulti ? defaultOf('markets') : b.market ?? '', 'Scrivi il mercato', 'single')}
       <label class="field single">Selezione<input name="selection" value="${isMulti ? '' : v('selection')}" placeholder="1"></label>
       ${choiceField('Bookmaker', 'bookmaker', listOf('bookmakers'), b.bookmaker ?? '', 'Scrivi il bookmaker')}
       <label class="field">Quota<input name="odds" inputmode="decimal" value="${v('odds')}" required placeholder="1,85"></label>
@@ -759,7 +763,7 @@ function openBet(id, preset = {}) {
       <label class="field full">Tag<input name="tags" value="${v('tags')}" placeholder="es. live, multipla, tipster X"></label>
       <label class="field full">Note<textarea name="notes">${v('notes')}</textarea></label>
     </div>
-    ${datalist('dlComp', 'competition')}${datalist('dlMarket', 'market')}`;
+    ${datalist('dlComp', 'competition')}<datalist id="dlMarket">${listOf('markets').map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`;
   const foot = `
     ${existing ? `<button type="submit" value="delete" class="btn danger left" formnovalidate>Elimina</button>
       <button type="submit" value="dup" class="btn">Duplica</button>` : ''}
@@ -786,7 +790,7 @@ function openBet(id, preset = {}) {
       ...(existing || {}),
       date: fd.date || today(), sport: choiceValue(fd, 'sport'), competition: fd.competition.trim(),
       event: fd.event.trim() || (legs.length ? legs.map((l) => l.event || l.selection).filter(Boolean).join(' + ') : ''),
-      market: legs.length ? 'Multipla' : fd.market.trim(), selection: legs.length ? `${legs.length} selezioni` : fd.selection.trim(), bookmaker: choiceValue(fd, 'bookmaker'),
+      market: legs.length ? 'Multipla' : choiceValue(fd, 'market'), selection: legs.length ? `${legs.length} selezioni` : fd.selection.trim(), bookmaker: choiceValue(fd, 'bookmaker'),
       odds: legs.length ? C.round2(C.legsOdds(legs)) : odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: existing?.closingOdds ?? '',
       strategy: fd.strategy, masanielloId: fd.strategy === 'masaniello' ? fd.masanielloId : '',
       cycleId: fd.strategy === 'cycle' ? fd.cycleId : '', confidence: fd.strategy === 'units' ? +fd.confidence || 1 : '',
@@ -1569,6 +1573,7 @@ function renderBankroll() {
         <div class="card stack">
           <h3>Menù della scheda scommessa</h3>
           ${listEditor('sports')}
+          ${listEditor('markets')}
           ${listEditor('bookmakers')}
           <div class="hint">★ indica la voce precompilata in una nuova scommessa. "Altro" è sempre disponibile e apre un campo libero. Togliere una voce non cambia le scommesse già registrate.</div>
         </div>

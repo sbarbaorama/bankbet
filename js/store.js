@@ -27,6 +27,8 @@ export function emptyData() {
       defaultSport: 'Calcio',
       bookmakers: ['Bet365', 'Betflag', 'Sisal', 'Goldbet', 'Planetwin365'],
       defaultBookmaker: 'Bet365',
+      markets: ['1X2', 'Doppia chance', 'Over/Under', 'Goal/No goal', 'Prossimo gol'],
+      defaultMarket: '1X2',
       updatedAt: 0,
     },
     bets: [],

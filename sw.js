@@ -1,5 +1,5 @@
 // Service worker: app shell offline, aggiornamento in background (stale-while-revalidate).
-const CACHE = 'bankbet-v6';
+const CACHE = 'bankbet-v7';
 const FONTS = 'bankbet-fonts-v1';
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 const SHELL = [
