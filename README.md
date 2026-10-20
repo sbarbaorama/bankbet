@@ -4,7 +4,7 @@ Web app (PWA) per registrare scommesse e gestire il bankroll. Funziona su PC e s
 
 ## Funzioni
 
-- **Registro scommesse (schedine)**: evento, sport, competizione, mercato, selezione, bookmaker, quota, puntata, esito (vinta, persa, rimborsata, mezza vinta/persa, cashout), tag e note. Chiusura rapida dell'esito con un tocco o con uno swipe su telefono (destra = vinta, sinistra = persa), con **Annulla** subito dopo. Ricerca, filtri, duplicazione.
+- **Registro scommesse (schedine)**: modulo con in alto evento, mercato, quota e puntata (data, sport, competizione, tag e note in *Dettagli*); menù a tendina per sport, mercato e bookmaker modificabili in Impostazioni. Elenco con le scommesse in corso in cima e quelle chiuse su una riga compatta, raggruppate per giorno con il profitto della giornata. Campi: evento, sport, competizione, mercato, selezione, bookmaker, quota, puntata, esito (vinta, persa, rimborsata, mezza vinta/persa, cashout), tag e note. Chiusura rapida dell'esito con un tocco o con uno swipe su telefono (destra = vinta, sinistra = persa), con **Annulla** subito dopo. Ricerca, filtri, duplicazione.
 - **Multiple**: ogni selezione con la sua quota ed esito; quota totale ed esito della multipla calcolati in automatico. In Statistiche, la % di selezioni vinte per mercato confrontata con quella implicita nelle quote.
 - **Freebet e bonus**: la freebet perde zero e incassa solo la vincita netta; i bonus accreditati sono un movimento a parte. Lo yield considera solo le giocate con denaro reale.
 - **Bankroll e conti**: depositi, prelievi, bonus e trasferimenti tra conti; saldo e disponibile per ogni bookmaker, con avviso se la puntata supera il saldo del conto.
@@ -20,9 +20,10 @@ Web app (PWA) per registrare scommesse e gestire il bankroll. Funziona su PC e s
 - **Simulatore Monte Carlo**: confronta le strategie (martingala compresa) sugli stessi esiti casuali: bankroll mediano, scenari peggiori e migliori, probabilità di chiudere in utile, rischio di rovina, drawdown.
 - **Segnali da Telegram**: i bot TotalCorner e Betwin aggiungono ai messaggi il link *Registra su BankBet*, che apre la nuova scommessa già compilata (partita, campionato, mercato, selezione, quota, probabilità, note); le bollette di Betwin arrivano come multipla con tutte le selezioni. In alternativa *Incolla segnale* legge il testo copiato da Telegram (anche più partite nello stesso messaggio) e, con l'app installata su Android, BankBet compare nel menu *Condividi*. La fonte resta sulla scommessa ed è analizzabile in Statistiche.
 - **Strumenti**: calcolatore Kelly, margine del bookmaker e quote eque, valore atteso (EV), surebet/dutching.
-- **Statistiche**: yield, ROI, win rate, drawdown massimo, serie, CLV e confronto tra profitto atteso e reale; profitto mensile; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
+- **Statistiche**: per periodo (30 giorni, 3 mesi, mese, anno, tutto); yield, ROI, win rate, drawdown massimo, serie, CLV e confronto tra profitto atteso e reale; profitto mensile; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
 - **Gestione del rischio**: stop-loss giornaliero e settimanale, stop-win giornaliero, obiettivo mensile.
-- **Aspetto**: tema scuro predefinito, chiaro o automatico.
+- **Aspetto**: tema scuro predefinito, chiaro o automatico, contrasti verificati (WCAG AA); spiegazione dei termini (i) toccando le etichette.
+- **Impostazioni** separate dal Bankroll (icona a ingranaggio): staking, limiti, menù, sincronizzazione, backup e tema.
 - **Dati**: salvati nel browser; backup/ripristino JSON, esportazione CSV (compatibile con Excel in italiano), sincronizzazione opzionale tra dispositivi tramite un repository GitHub privato.
 
 ## Link per i segnali

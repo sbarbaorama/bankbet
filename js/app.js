@@ -220,7 +220,8 @@ function suggestStake(v, existingId) {
 const ui = {
   betFilter: { q: '', status: '', sport: '', period: '' },
   betLimit: 100,
-  toolTab: 'kelly',
+  toolTab: 'masaniello',
+  statPeriod: 'all',
   statGroup: 'sport',
   openMasaniello: null,
   openCycle: null,
@@ -231,7 +232,7 @@ const ui = {
   calMonth: null,
 };
 
-const views = { home: renderHome, bets: renderBets, tools: renderTools, stats: renderStats, bankroll: renderBankroll };
+const views = { home: renderHome, bets: renderBets, tools: renderTools, stats: renderStats, bankroll: renderBankroll, settings: renderSettings };
 
 function current() {
   const v = location.hash.slice(1);
@@ -293,7 +294,7 @@ function renderHome() {
           <input id="initBank" inputmode="decimal" placeholder="es. 500">
         </label>
         <button class="btn primary" data-action="init-bank">Inizia</button>
-        <p class="hint" style="margin:0">Hai già dei dati su un altro dispositivo? Vai su <a href="#bankroll">Bankroll → Sincronizzazione</a> o importa un backup.</p>
+        <p class="hint" style="margin:0">Hai già dei dati su un altro dispositivo? Vai su <a href="#settings">Impostazioni → Sincronizzazione</a> o importa un backup.</p>
       </div>`;
     return;
   }
@@ -367,17 +368,17 @@ function renderHome() {
           </div>
           <div class="chart-wrap"><canvas class="chart" id="chBank" role="img" aria-label="Andamento del bankroll nel periodo selezionato"></canvas></div>
           <div class="hero-foot">
-            <div><div class="label-caps">Disponibile</div><div class="v">${money(b.available)}</div></div>
-            <div><div class="label-caps">In gioco</div><div class="v">${money(b.pendingStake)} <small class="muted">· ${pending.length} ${pending.length === 1 ? 'giocata' : 'giocate'}</small></div></div>
-            ${lk.n ? `<div title="Profitto reale meno profitto atteso, sulle ${lk.n} scommesse del periodo con probabilità stimata o quota di chiusura"><div class="label-caps">Fortuna vs EV</div><div class="v ${cls(lk.luck)}">${signed(lk.luck)}</div></div>` : ''}
+            <div><div class="label-caps">Disponibile${info('available')}</div><div class="v">${money(b.available)}</div></div>
+            <div><div class="label-caps">In gioco${info('pending')}</div><div class="v">${money(b.pendingStake)} <small class="muted">· ${pending.length} ${pending.length === 1 ? 'giocata' : 'giocate'}</small></div></div>
+            ${lk.n ? `<div title="Profitto reale meno profitto atteso, sulle ${lk.n} scommesse del periodo con probabilità stimata o quota di chiusura"><div class="label-caps">Fortuna vs EV${info('luck')}</div><div class="v ${cls(lk.luck)}">${signed(lk.luck)}</div></div>` : ''}
           </div>
         </section>
         <div class="home-side">
           <div class="kpis two">
-            ${kpi('Yield', `<span class="${cls(sum.yield)}">${sum.yield > 0 ? '+' : ''}${pct(sum.yield)}</span>`, `su ${money(sum.staked)} giocati`)}
-            ${kpi('Win rate', pct(sum.winRate, 0), `${sum.settled} chiuse · q. media ${sum.avgOdds ? fmtOdds(sum.avgOdds) : '—'}`)}
-            ${kpi('Profitto del mese', `<span class="${cls(monthP)}">${signed(monthP)}</span>`, `${monthN} ${monthN === 1 ? 'chiusa' : 'chiuse'} da inizio mese`)}
-            ${kpi('Max drawdown', `<span class="${series.maxDrawdown > 0 ? 'neg' : ''}">${series.maxDrawdown > 0 ? '−' : ''}${money(series.maxDrawdown)}</span>`, `serie attuale ${st.current}`)}
+            ${kpi('Yield', `<span class="${cls(sum.yield)}">${sum.yield > 0 ? '+' : ''}${pct(sum.yield)}</span>`, sum.freebetN ? `su ${money(sum.staked)} · freebet escluse` : `su ${money(sum.staked)} giocati`, 'yield')}
+            ${kpi('Win rate', pct(sum.winRate, 0), `${sum.settled} chiuse · quota ${sum.avgOdds ? fmtOdds(sum.avgOdds) : '—'}`, 'winrate')}
+            ${kpi('Profitto del mese', `<span class="${cls(monthP)}">${signed(monthP)}</span>`, `${monthN} ${monthN === 1 ? 'chiusa' : 'chiuse'} da inizio mese`, 'month')}
+            ${kpi('Max drawdown', `<span class="${series.maxDrawdown > 0 ? 'neg' : ''}">${series.maxDrawdown > 0 ? '−' : ''}${money(series.maxDrawdown)}</span>`, `serie attuale ${st.current}`, 'drawdown')}
           </div>
           ${limitsCard()}
         </div>
@@ -411,7 +412,7 @@ function renderHome() {
 function limitsCard() {
   const s = store.get().settings;
   if (!(s.dailyStopLoss > 0) && !(s.weeklyStopLoss > 0) && !(s.monthlyGoal > 0)) {
-    return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#bankroll">Imposta</a></div>
+    return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#settings">Imposta</a></div>
       <div class="hint">Nessun limite impostato. Uno stop-loss giornaliero o settimanale ti aiuta a fermarti nelle giornate storte.</div></div>`;
   }
   const monthP = profitBetween(today().slice(0, 8) + '01');
@@ -424,7 +425,7 @@ function limitsCard() {
   const goal = s.monthlyGoal > 0 ? `<div class="meter goal ${monthP >= s.monthlyGoal ? 'done' : ''}">
       <div class="top"><span>Obiettivo del mese</span><span class="big-num ${cls(monthP)}">${signed(monthP)} / ${money(s.monthlyGoal)}</span></div>
       <div class="bar" role="progressbar" aria-label="Obiettivo del mese" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(Math.max(0, Math.min(100, (monthP / s.monthlyGoal) * 100)))}"><div style="width:${Math.max(0, Math.min(100, (monthP / s.monthlyGoal) * 100))}%"></div></div></div>` : '';
-  return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#bankroll">Modifica</a></div>
+  return `<div class="card"><div class="card-head"><span class="label-caps">Limiti e obiettivi</span><a href="#settings">Modifica</a></div>
     ${s.dailyStopLoss > 0 ? meter('Perdita oggi', lossSince(today()), s.dailyStopLoss) : ''}
     ${s.weeklyStopLoss > 0 ? meter('Perdita ultimi 7 giorni', lossSince(daysAgo(6)), s.weeklyStopLoss) : ''}
     ${goal}</div>`;
@@ -503,8 +504,27 @@ function cycleMini({ c, state }) {
   </div>`;
 }
 
-function kpi(label, value, sub) {
-  return `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+// Spiegazioni brevi dei termini (pulsante "i").
+const GLOSSARY = {
+  yield: ['Yield', 'Profitto diviso per il totale giocato. +5% vuol dire che, in media, ogni 100 € puntati ne hai guadagnati 5. Le freebet sono escluse perché la puntata non è denaro tuo.'],
+  winrate: ['Win rate', 'Percentuale di scommesse vinte sul totale di quelle chiuse (le rimborsate non contano). Da sola non dice se guadagni: dipende anche dalle quote.'],
+  profit: ['Profitto', 'Somma di vincite e perdite delle scommesse chiuse nel periodo, freebet comprese.'],
+  month: ['Profitto del mese', 'Profitto delle scommesse chiuse dal primo giorno del mese corrente.'],
+  drawdown: ['Max drawdown', 'La perdita più grande accumulata da un picco di profitto al punto più basso successivo. Misura quanto è stata dura la fase peggiore.'],
+  streak: ['Serie', 'Vinte (V) o perse (P) consecutive in corso, con le serie più lunghe registrate.'],
+  clv: ['CLV', 'Closing line value: quanto la tua quota era migliore di quella alla chiusura del mercato. Positivo in modo costante è il segnale più affidabile di un vantaggio reale.'],
+  luck: ['Fortuna vs EV', 'Profitto reale meno profitto atteso, calcolato sulle scommesse con probabilità stimata. Positivo: sei stato più fortunato del previsto; negativo: meno.'],
+  available: ['Disponibile', 'Saldo meno le puntate delle scommesse ancora in corso: è la cifra su cui si calcolano le puntate suggerite.'],
+  pending: ['In gioco', 'Somma delle puntate delle scommesse non ancora chiuse (le freebet non contano).'],
+};
+
+function info(key) {
+  const g = GLOSSARY[key];
+  return g ? `<button type="button" class="info" data-action="info" data-k="${key}" aria-label="Cos'è ${esc(g[0])}?">i</button>` : '';
+}
+
+function kpi(label, value, sub, infoKey) {
+  return `<div class="kpi"><div class="label">${label}${infoKey ? info(infoKey) : ''}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
 }
 
 function betItem(b) {
@@ -535,6 +555,20 @@ function betItem(b) {
     </div>`;
 }
 
+// Riga compatta per una scommessa chiusa: si tocca per aprirla.
+function betRow(b) {
+  const p = C.betProfit(b);
+  const isMulti = !!(b.legs && b.legs.length);
+  const pick = isMulti ? `Multipla ×${b.legs.length}` : [b.market, b.selection].filter(Boolean).join(': ');
+  const meta = [pick, b.bookmaker, b.freebet ? 'Freebet' : ''].filter(Boolean).join(' · ');
+  const res = b.status === 'void' ? 'Rimborsata' : b.status === 'cashout' ? `Cashout ${signed(p)}` : signed(p);
+  return `<button type="button" class="bet-row" data-action="edit-bet" data-id="${b.id}" aria-label="${esc(`${b.event || 'Scommessa'}, ${C.STATUSES[b.status]}, ${signed(p)}`)}">
+    <span class="dot ${b.status}" aria-hidden="true"></span>
+    <span class="r-main"><span class="r-title">${esc(b.event || b.selection || 'Scommessa')}</span><span class="r-meta">${esc(meta)}</span></span>
+    <span class="r-side"><span class="r-odds">@${fmtOdds(b.odds)}</span><span class="r-res ${b.status === 'void' ? '' : cls(p)}">${res}</span></span>
+  </button>`;
+}
+
 // ---------- SCOMMESSE ----------
 function filteredBets() {
   const f = ui.betFilter;
@@ -561,29 +595,36 @@ function renderBets() {
   const f = ui.betFilter;
   const list = filteredBets();
   const s = C.summarize(list);
-  const shown = list.slice(0, ui.betLimit);
+  const pend = list.filter((b) => !C.isSettled(b)).sort((a, z) => (a.date < z.date ? -1 : a.date > z.date ? 1 : 0));
+  const settledDay = (b) => b.settledDate || b.date;
+  const closed = list.filter(C.isSettled)
+    .sort((a, z) => (settledDay(a) === settledDay(z) ? (z.updatedAt || 0) - (a.updatedAt || 0) : settledDay(a) < settledDay(z) ? 1 : -1));
+  const dayTot = new Map();
+  for (const b of closed) dayTot.set(settledDay(b), (dayTot.get(settledDay(b)) || 0) + C.betProfit(b));
+  const shown = closed.slice(0, ui.betLimit);
   let lastDate = '';
-  const items = shown.map((b) => {
-    const head = b.date !== lastDate ? `<div class="date-head">${esc(dateHead(b.date))}</div>` : '';
-    lastDate = b.date;
-    return head + betItem(b);
+  const rows = shown.map((b) => {
+    const k = settledDay(b);
+    const head = k !== lastDate
+      ? `<div class="date-head"><span>${esc(dateHead(k))}</span><span class="big-num ${cls(dayTot.get(k))}">${signed(dayTot.get(k))}</span></div>` : '';
+    lastDate = k;
+    return head + betRow(b);
   }).join('');
+  const pendStake = pend.reduce((a, b) => a + C.realStake(b), 0);
   view.innerHTML = `
     <div class="stack">
       <div class="spread"><h2>Schedine</h2>
-        <div class="row"><button class="btn small" data-action="paste-signal">Incolla segnale</button>
-        <button class="btn small" data-action="export-csv">Esporta CSV</button>
-        <button class="btn small primary" data-action="new-bet">+ Nuova</button></div></div>
+        <button class="btn small" data-action="paste-signal">Incolla segnale</button></div>
       <div class="filters">
-        <input class="search" id="fQ" type="text" placeholder="Cerca evento, selezione, tag…" value="${esc(f.q)}">
-        <select id="fStatus">
+        <input class="search" id="fQ" type="search" aria-label="Cerca nelle schedine" placeholder="Cerca evento, selezione, tag…" value="${esc(f.q)}">
+        <select id="fStatus" aria-label="Filtra per esito">
           <option value="">Tutti gli esiti</option>
           <option value="pending" ${f.status === 'pending' ? 'selected' : ''}>In corso</option>
           <option value="settled" ${f.status === 'settled' ? 'selected' : ''}>Chiuse</option>
           ${Object.entries(C.STATUSES).filter(([k]) => k !== 'pending').map(([k, v]) => `<option value="${k}" ${f.status === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
-        <select id="fSport"><option value="">Tutti gli sport</option>${distinct('sport').map((x) => `<option ${f.sport === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
-        <select id="fPeriod">
+        <select id="fSport" aria-label="Filtra per sport"><option value="">Tutti gli sport</option>${distinct('sport').map((x) => `<option ${f.sport === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>
+        <select id="fPeriod" aria-label="Filtra per periodo">
           ${[['', 'Sempre'], ['7', 'Ultimi 7 giorni'], ['30', 'Ultimi 30 giorni'], ['month', 'Questo mese'], ['year', "Quest'anno"]]
             .map(([k, v]) => `<option value="${k}" ${f.period === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
@@ -592,10 +633,16 @@ function renderBets() {
         <div><div class="hint">Scommesse</div><strong>${s.count}</strong></div>
         <div><div class="hint">Giocato</div><strong class="num">${money(s.staked)}</strong></div>
         <div><div class="hint">Profitto</div><strong class="num ${cls(s.profit)}">${signed(s.profit)}</strong></div>
-        <div><div class="hint">Yield</div><strong class="num ${cls(s.yield)}">${pct(s.yield)}</strong></div>
+        <div><div class="hint">Yield${s.freebetN ? '*' : ''}</div><strong class="num ${cls(s.yield)}">${pct(s.yield)}</strong></div>
       </div>
-      ${list.length ? `<div class="bet-list">${items}</div>` : '<div class="empty">Nessuna scommessa. Tocca + per aggiungerne una.</div>'}
-      ${list.length > shown.length ? `<button class="btn" data-action="more-bets">Mostra altre (${list.length - shown.length})</button>` : ''}
+      ${!list.length ? '<div class="empty">Nessuna scommessa. Tocca + per aggiungerne una.</div>' : ''}
+      ${pend.length ? `<section class="stack" style="gap:10px">
+        <div class="sec-head"><h3>In corso · ${pend.length}</h3><span class="hint">${money(pendStake)} in gioco</span></div>
+        <div class="bet-list">${pend.map(betItem).join('')}</div></section>` : ''}
+      ${closed.length ? `<section class="stack" style="gap:6px">
+        <div class="sec-head"><h3>Chiuse · ${closed.length}</h3>${s.freebetN ? '<span class="hint">* yield senza freebet</span>' : ''}</div>
+        <div class="row-list">${rows}</div></section>` : ''}
+      ${closed.length > shown.length ? `<button class="btn" data-action="more-bets">Mostra altre (${closed.length - shown.length})</button>` : ''}
     </div>`;
   const bind = (id, key) => $(id).addEventListener(id === '#fQ' ? 'input' : 'change', (e) => {
     ui.betFilter[key] = e.target.value;
@@ -605,10 +652,10 @@ function renderBets() {
   bind('#fQ', 'q'); bind('#fStatus', 'status'); bind('#fSport', 'sport'); bind('#fPeriod', 'period');
 }
 
-function exportCSV() {
+function exportCSV(list = filteredBets()) {
   const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Cashout', 'Profitto', 'Strategia', 'Prob. stimata %', 'Freebet', 'Selezioni multipla', 'Tag', 'Note']];
   const n = (x) => (x === '' || x == null || Number.isNaN(+x) ? '' : String(+x).replace('.', ','));
-  for (const b of filteredBets()) {
+  for (const b of list) {
     rows.push([b.date, b.settledDate || '', b.sport, b.competition, b.event, b.market, b.selection, b.bookmaker,
       n(b.odds), n(b.closingOdds), n(b.stake), C.STATUSES[b.status], n(b.payout), n(C.round2(C.betProfit(b))), b.strategy, n(b.prob), b.freebet ? 'sì' : '',
       (b.legs || []).map((l) => `${l.event} ${l.market} ${l.selection} @${String(l.odds).replace('.', ',')} (${C.LEG_STATUSES[l.status] || ''})`).join(' | '), b.tags, b.notes]);
@@ -710,17 +757,17 @@ function openBet(id, preset = {}) {
   const activeM = d.masaniello.filter((m) => masanielloInfo(m).state?.status === 'active' || m.id === b.masanielloId);
   const activeC = d.cycles.filter((c) => cycleInfo(c).state.status === 'active' || c.id === b.cycleId);
   const v = (k) => esc(b[k] ?? '');
+  // numeri nei campi con la virgola, come nel resto dell'app
+  const dv = (k) => (b[k] === '' || b[k] == null ? '' : esc(String(b[k]).replace('.', ',')));
   const isMulti = !!(b.legs && b.legs.length);
   const legsInit = isMulti ? b.legs : [{}, {}];
+  const detailsSummary = [fmtDate(b.date), b.sport, b.competition].filter(Boolean).join(' · ');
   const body = `
-    <div class="form-grid three">
-      <label class="field">Data<input type="date" name="date" value="${v('date')}" required></label>
-      ${choiceField('Sport', 'sport', listOf('sports'), b.sport ?? '', 'Scrivi lo sport')}
-      <label class="field">Competizione<input name="competition" list="dlComp" value="${v('competition')}" placeholder="Serie A"></label>
-      <label class="row full" style="font-size:.9rem;gap:16px">
-        <span class="row" style="gap:6px"><input type="checkbox" name="isMulti" value="1" ${isMulti ? 'checked' : ''} style="width:auto;min-height:0"> Multipla</span>
-        <span class="row" style="gap:6px"><input type="checkbox" name="freebet" value="1" ${b.freebet ? 'checked' : ''} style="width:auto;min-height:0"> Freebet (puntata non tua)</span>
-      </label>
+    <div class="row checks">
+      <label class="check"><input type="checkbox" name="isMulti" value="1" ${isMulti ? 'checked' : ''}> Multipla</label>
+      <label class="check"><input type="checkbox" name="freebet" value="1" ${b.freebet ? 'checked' : ''}> Freebet (puntata non tua)</label>
+    </div>
+    <div class="form-grid">
       <label class="field full">Evento<input name="event" value="${v('event')}" placeholder="${isMulti ? 'Nome della multipla (opz.)' : 'Inter – Milan'}" autocomplete="off"></label>
       <div class="full" id="legsBox" ${isMulti ? '' : 'hidden'}>
         <div class="legs">${legsInit.map(legRow).join('')}</div>
@@ -728,10 +775,11 @@ function openBet(id, preset = {}) {
       </div>
       ${choiceField('Mercato', 'market', listOf('markets'), isMulti ? defaultOf('markets') : b.market ?? '', 'Scrivi il mercato', 'single')}
       <label class="field single">Selezione<input name="selection" value="${isMulti ? '' : v('selection')}" placeholder="1"></label>
-      ${choiceField('Bookmaker', 'bookmaker', listOf('bookmakers'), b.bookmaker ?? '', 'Scrivi il bookmaker')}
-      <label class="field">Quota<input name="odds" inputmode="decimal" value="${v('odds')}" required placeholder="1,85"></label>
-      <label class="field" id="probF">Prob. stimata %<input name="prob" inputmode="decimal" value="${v('prob')}" placeholder="per Kelly"></label>
+      <label class="field">Quota<input name="odds" inputmode="decimal" value="${dv('odds')}" required placeholder="1,85"></label>
+      <label class="field">Puntata (${esc(d.settings.currency)})<input name="stake" inputmode="decimal" value="${dv('stake')}" required placeholder="0,00"></label>
     </div>
+    <div class="suggest" id="suggest"></div>
+    <div id="evLine" class="hint"></div>
     <div class="form-grid">
       <label class="field">Strategia
         <select name="strategy">
@@ -748,21 +796,24 @@ function openBet(id, preset = {}) {
         </select></label>
       <label class="field" id="confF">Fiducia
         <select name="confidence">${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${(+b.confidence || 1) === n ? 'selected' : ''}>${n} ${n === 1 ? 'unità' : 'unità'}</option>`).join('')}</select></label>
-    </div>
-    <div class="suggest" id="suggest"></div>
-    <div id="evLine" class="hint"></div>
-    <div class="form-grid three">
-      <label class="field">Puntata (${esc(d.settings.currency)})<input name="stake" inputmode="decimal" value="${v('stake')}" required></label>
+      <label class="field" id="probF">Prob. stimata %<input name="prob" inputmode="decimal" value="${dv('prob')}" placeholder="per Kelly"></label>
+      ${choiceField('Bookmaker', 'bookmaker', listOf('bookmakers'), b.bookmaker ?? '', 'Scrivi il bookmaker')}
       <label class="field">Esito
         <select name="status">${Object.entries(C.STATUSES).map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <label class="field" id="payoutF">Incasso cashout<input name="payout" inputmode="decimal" value="${v('payout')}"></label>
+      <label class="field" id="payoutF">Incasso cashout<input name="payout" inputmode="decimal" value="${dv('payout')}"></label>
       <label class="field" id="settledF">Data esito<input type="date" name="settledDate" value="${v('settledDate')}"></label>
     </div>
     <div id="retLine" class="hint"></div>
-    <div class="form-grid">
-      <label class="field full">Tag<input name="tags" value="${v('tags')}" placeholder="es. live, multipla, tipster X"></label>
-      <label class="field full">Note<textarea name="notes">${v('notes')}</textarea></label>
-    </div>
+    <details class="more" id="betDetails">
+      <summary>Dettagli <span class="hint" id="detSum">${esc(detailsSummary)}</span></summary>
+      <div class="form-grid">
+        <label class="field">Data<input type="date" name="date" value="${v('date')}" required></label>
+        ${choiceField('Sport', 'sport', listOf('sports'), b.sport ?? '', 'Scrivi lo sport')}
+        <label class="field full">Competizione<input name="competition" list="dlComp" value="${v('competition')}" placeholder="Serie A"></label>
+        <label class="field full">Tag<input name="tags" value="${v('tags')}" placeholder="es. live, multipla, tipster X"></label>
+        <label class="field full">Note<textarea name="notes">${v('notes')}</textarea></label>
+      </div>
+    </details>
     ${datalist('dlComp', 'competition')}<datalist id="dlMarket">${listOf('markets').map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`;
   const foot = `
     ${existing ? `<button type="submit" value="delete" class="btn danger left" formnovalidate>Elimina</button>
@@ -868,6 +919,7 @@ function openBet(id, preset = {}) {
       ret += `${ret ? ' · ' : ''}Disponibile su ${book}: ${money(avail)}${!fd.freebet && stake > avail + 0.005 ? ' ⚠ saldo del conto insufficiente' : ''}`;
     }
     $('#retLine').textContent = ret;
+    $('#detSum').textContent = [fmtDate(fd.date), choiceValue(fd, 'sport'), fd.competition.trim()].filter(Boolean).join(' · ');
   };
   let lastSuggest = null;
   $('#suggest').addEventListener('click', (e) => {
@@ -951,11 +1003,16 @@ function handleIncoming() {
 
 // ---------- STRUMENTI ----------
 function renderTools() {
-  const tabs = [['kelly', 'Kelly'], ['masaniello', 'Masaniello'], ['cycles', 'Cicli progressivi'], ['sim', 'Simulatore'], ['value', 'Valore e margine'], ['surebet', 'Surebet']];
+  const groups = [
+    ['methods', 'Metodi', [['masaniello', 'Masaniello'], ['cycles', 'Cicli'], ['sim', 'Simulatore']]],
+    ['calc', 'Calcolatori', [['kelly', 'Kelly'], ['value', 'Valore'], ['surebet', 'Surebet']]],
+  ];
+  const group = groups.find((g) => g[2].some(([k]) => k === ui.toolTab)) || groups[0];
   view.innerHTML = `
     <div class="stack">
-      <h2>Strumenti</h2>
-      <div class="sub-tabs">${tabs.map(([k, l]) => `<button class="btn small ${ui.toolTab === k ? 'primary' : ''}" data-action="tool-tab" data-tab="${k}">${l}</button>`).join('')}</div>
+      <div class="spread"><h2>Strumenti</h2>
+        <div class="seg" role="group" aria-label="Gruppo di strumenti">${groups.map(([k, l, items]) => `<button class="${group[0] === k ? 'on' : ''}" data-action="tool-tab" data-tab="${group[0] === k ? ui.toolTab : items[0][0]}" aria-pressed="${group[0] === k}">${l}</button>`).join('')}</div></div>
+      <div class="tool-tabs" role="tablist">${group[2].map(([k, l]) => `<button role="tab" aria-selected="${ui.toolTab === k}" class="${ui.toolTab === k ? 'on' : ''}" data-action="tool-tab" data-tab="${k}">${l}</button>`).join('')}</div>
       <div id="toolBody"></div>
     </div>`;
   ({ kelly: toolKelly, masaniello: toolMasaniello, cycles: toolCycles, sim: toolSim, value: toolValue, surebet: toolSurebet })[ui.toolTab]($('#toolBody'));
@@ -1030,13 +1087,13 @@ function masanielloCard({ m, state, linked }) {
   if (open) {
     const rows = C.masanielloGrid(plan);
     grid = `
-      <div class="table-wrap"><table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table>
         <tr><th>Vinte \\ Errori</th>${rows[0].map((_, l) => `<th>${l}</th>`).join('')}</tr>
         ${rows.map((r, w) => `<tr><td>${w}</td>${r.map((c, l) => `<td class="${state.status === 'active' && w === state.w && l === state.losses ? 'cur' : ''}">${fmt(c.stake)}</td>`).join('')}</tr>`).join('')}
       </table></div>
       <div class="hint">Puntate teoriche a quota ${plan.q} per ogni combinazione vinte/errori. Se giochi a quote diverse, la puntata reale viene ricalcolata in base al capitale effettivo.</div>
       <h3>Scommesse collegate (${linked.length})</h3>
-      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map(betItem).join('')}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
+      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map((x) => (C.isSettled(x) ? betRow(x) : betItem(x))).join("")}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
       <div class="row">
         ${state.status === 'active' ? `<button class="btn" data-action="m-close" data-id="${m.id}">Chiudi ciclo</button>` : ''}
         ${m.closed ? `<button class="btn" data-action="m-reopen" data-id="${m.id}">Riapri</button>` : ''}
@@ -1221,7 +1278,7 @@ function cycleCard({ c, state, linked }) {
   if (open) {
     more = `
       <h3>Scommesse collegate (${linked.length})</h3>
-      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map(betItem).join('')}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
+      ${linked.length ? `<div class="bet-list">${linked.slice().reverse().map((x) => (C.isSettled(x) ? betRow(x) : betItem(x))).join("")}</div>` : '<div class="hint">Nessuna scommessa collegata.</div>'}
       <div class="row">
         ${state.status === 'active' ? `<button class="btn" data-action="c-close" data-id="${c.id}">Chiudi ciclo</button>` : ''}
         ${c.closed ? `<button class="btn" data-action="c-reopen" data-id="${c.id}">Riapri</button>` : ''}
@@ -1392,7 +1449,7 @@ function drawSim() {
       <div class="card-head" style="margin:0"><h3>Andamento mediano del bankroll</h3><span class="hint">${v.sims} simulazioni × ${v.n} giocate</span></div>
       <div class="legend">${r.results.map((x) => `<span><i style="background:var(--s${slot(x.key)})"></i>${name[x.key]}</span>`).join('')}</div>
       <div class="chart-wrap"><canvas class="chart" id="chSim" style="height:260px" role="img" aria-label="Bankroll mediano per strategia lungo le giocate"></canvas></div>
-      <div class="table-wrap"><table>
+      <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table>
         <tr><th>Strategia</th><th>Mediana finale</th><th>10% peggiori</th><th>10% migliori</th><th>Chiude in utile</th><th>Rovina</th><th>Drawdown mediano</th></tr>
         ${r.results.map((x) => `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;background:var(--s${slot(x.key)})"></i>${name[x.key]}</td>
           <td class="${cls(x.median - v.bank)}">${money(x.median)}</td><td>${money(x.p10)}</td><td>${money(x.p90)}</td>
@@ -1406,12 +1463,29 @@ function drawSim() {
 }
 
 // ---------- STATISTICHE ----------
+const STAT_PERIODS = [['30', '30G', 30], ['90', '3M', 90], ['month', 'Mese', 0], ['year', 'Anno', 0], ['all', 'Tutto', 0]];
+
+function statFrom(k) {
+  if (k === 'month') return today().slice(0, 8) + '01';
+  if (k === 'year') return today().slice(0, 5) + '01-01';
+  const p = STAT_PERIODS.find((x) => x[0] === k);
+  return p && p[2] ? daysAgo(p[2] - 1) : '';
+}
+
 function renderStats() {
   const d = store.get();
-  const bets = d.bets;
+  const per = ui.statPeriod || 'all';
+  const from = statFrom(per);
+  const bets = from ? d.bets.filter((b) => C.isSettled(b) && (b.settledDate || b.date) >= from) : d.bets;
   const s = C.summarize(bets);
   const st = C.streaks(bets);
-  const { maxDrawdown } = C.bankrollSeries(bets, d.transactions);
+  const { maxDrawdown } = C.bankrollSeries(bets, []);
+  const periodSeg = `<div class="seg" role="group" aria-label="Periodo delle statistiche">${STAT_PERIODS.map(([k, l]) => `<button class="${k === per ? 'on' : ''}" data-action="stat-period" data-period="${k}" aria-pressed="${k === per}">${l}</button>`).join('')}</div>`;
+  if (!s.settled) {
+    view.innerHTML = `<div class="stack"><div class="spread"><h2>Statistiche</h2>${periodSeg}</div>
+      <div class="card empty">${d.bets.some(C.isSettled) ? 'Nessuna scommessa chiusa in questo periodo.' : 'Le statistiche compaiono dopo le prime scommesse chiuse: registra una scommessa e segnane l\'esito.'}</div></div>`;
+    return;
+  }
   const groups = {
     sport: ['Sport', (b) => b.sport],
     competition: ['Competizione', (b) => b.competition],
@@ -1436,25 +1510,25 @@ function renderStats() {
     g.n++; g.odds += +l.odds || 0; if (l.status === 'won') g.won++;
     return m.set(k, g);
   }, new Map()).values()].sort((a, b) => b.n - a.n);
-  const bonusTot = d.transactions.filter((t) => t.type === 'bonus').reduce((a, t) => a + +t.amount, 0);
+  const bonusTot = d.transactions.filter((t) => t.type === 'bonus' && (!from || t.date >= from)).reduce((a, t) => a + +t.amount, 0);
   const withProb = bets.filter((b) => C.isSettled(b) && +b.prob > 0 && b.status !== 'void');
   const actualProb = withProb.reduce((a, b) => a + C.betProfit(b), 0);
 
   view.innerHTML = `
     <div class="stack">
-      <h2>Statistiche</h2>
+      <div class="spread"><h2>Statistiche</h2>${periodSeg}</div>
       <div class="kpis">
-        ${kpi('Profitto', `<span class="${cls(s.profit)}">${signed(s.profit)}</span>`, `${s.settled} scommesse chiuse`)}
-        ${kpi('Yield', `<span class="${cls(s.yield)}">${pct(s.yield, 2)}</span>`, `giocato ${money(s.staked)}`)}
-        ${kpi('Puntata media', money(s.avgStake), `quota media ${s.avgOdds ? s.avgOdds.toFixed(2) : '—'}`)}
-        ${kpi('Serie', st.current, `max ${st.maxW} vinte · ${st.maxL} perse`)}
-        ${s.clvN ? kpi('CLV medio', `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, `su ${s.clvN} scommesse`) : kpi('Win rate', pct(s.winRate, 0), `quota media ${s.avgOdds ? fmtOdds(s.avgOdds) : '—'}`)}
-        ${kpi('Max drawdown', money(maxDrawdown), 'dal picco di profitto')}
+        ${kpi('Profitto', `<span class="${cls(s.profit)}">${signed(s.profit)}</span>`, s.freebetN ? `di cui freebet ${signed(s.freebetProfit)}` : `${s.settled} scommesse chiuse`, 'profit')}
+        ${kpi(s.freebetN ? 'Yield senza freebet' : 'Yield', `<span class="${cls(s.yield)}">${pct(s.yield, 2)}</span>`, `giocato ${money(s.staked)}`, 'yield')}
+        ${kpi('Puntata media', money(s.avgStake), `quota media ${s.avgOdds ? fmtOdds(s.avgOdds) : '—'}`)}
+        ${kpi('Serie', st.current, `max ${st.maxW} vinte · ${st.maxL} perse`, 'streak')}
+        ${s.clvN ? kpi('CLV medio', `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, `su ${s.clvN} scommesse`, 'clv') : kpi('Win rate', pct(s.winRate, 0), `${s.settled} chiuse`, 'winrate')}
+        ${kpi('Max drawdown', `<span class="${maxDrawdown > 0 ? 'neg' : ''}">${maxDrawdown > 0 ? '−' : ''}${money(maxDrawdown)}</span>`, 'dal picco di profitto', 'drawdown')}
       </div>
-      <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
+      <div class="card"><h3>Profitto mensile</h3><div class="chart-wrap"><canvas class="chart" id="chMonth" role="img" aria-label="Profitto per mese"></canvas></div></div>
       ${bonusTot || s.freebetN ? `<div class="card"><h3>Bonus e freebet</h3><p class="hint" style="margin:0">Bonus accreditati <strong>${money(bonusTot)}</strong> · freebet giocate <strong>${s.freebetN}</strong> con profitto <strong class="${cls(s.freebetProfit)}">${signed(s.freebetProfit)}</strong>. Lo yield considera solo le giocate con denaro reale.</p></div>` : ''}
       ${legGroups.length ? `<div class="card"><h3>Selezioni delle multiple</h3>
-        <div class="table-wrap"><table><tr><th>Mercato</th><th>Selezioni</th><th>Vinte</th><th>% vinte</th><th>Quota media</th><th>% implicita</th></tr>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table><tr><th>Mercato</th><th>Selezioni</th><th>Vinte</th><th>% vinte</th><th>Quota media</th><th>% implicita</th></tr>
         ${legGroups.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.n}</td><td>${g.won}</td><td class="${cls(g.won / g.n - g.n / g.odds)}">${pct(g.won / g.n, 0)}</td><td>${fmtOdds(g.odds / g.n)}</td><td>${pct(g.n / g.odds, 0)}</td></tr>`).join('')}
         </table></div><div class="hint">Confronta la % di selezioni vinte con quella implicita nelle quote: se è più bassa, quel mercato ti fa perdere valore nelle multiple.</div></div>` : ''}
       ${withProb.length ? `<div class="card"><h3>Le tue stime funzionano?</h3>
@@ -1462,7 +1536,7 @@ function renderStats() {
         Con pochi campioni la varianza domina: valuta il dato dopo almeno 200–300 scommesse. Il CLV positivo è l'indicatore più rapido di un vantaggio reale.</p></div>` : ''}
       <div class="card">
         <div class="sub-tabs" style="margin-bottom:12px">${Object.entries(groups).map(([k, [l]]) => `<button class="btn small ${ui.statGroup === k ? 'primary' : ''}" data-action="stat-group" data-group="${k}">${l}</button>`).join('')}</div>
-        ${rows.length ? `<div class="table-wrap"><table>
+        ${rows.length ? `<div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table>
           <tr><th>${groups[ui.statGroup][0]}</th><th>N</th><th>Giocato</th><th>Profitto</th><th>Yield</th><th>Win%</th><th>Quota m.</th></tr>
           ${rows.map((r) => `<tr><td>${esc(r.key)}</td><td>${r.settled}</td><td>${fmt(r.staked)}</td><td class="${cls(r.profit)}">${fmt(r.profit)}</td><td class="${cls(r.yield)}">${pct(r.yield)}</td><td>${pct(r.winRate, 0)}</td><td>${r.avgOdds ? r.avgOdds.toFixed(2) : '—'}</td></tr>`).join('')}
         </table></div>` : '<div class="empty">Nessuna scommessa chiusa</div>'}
@@ -1474,47 +1548,65 @@ function renderStats() {
     months.set(k, (months.get(k) || 0) + C.betProfit(x));
   }
   const bars = [...months.entries()].sort().slice(-12).map(([k, v]) => ({ label: k.slice(5) + '/' + k.slice(2, 4), value: v }));
-  barChart($('#chMonth'), bars, { emptyText: 'Nessuna scommessa chiusa' });
+  barChart($('#chMonth'), bars, { emptyText: 'Nessuna scommessa chiusa', fmtValue: signed,
+    fmtLabel: (l) => { const [m, y] = l.split('/'); return new Date(2000 + +y, +m - 1, 1).toLocaleDateString('it-IT', { month: 'long', year: 'numeric' }); } });
 }
 
-// ---------- BANKROLL / IMPOSTAZIONI ----------
+// ---------- BANKROLL ----------
 function renderBankroll() {
   const d = store.get();
-  const s = d.settings;
   const b = balances();
-  const cfg = sync.getConfig();
   const txs = d.transactions.slice().sort((a, z) => (a.date < z.date ? 1 : -1));
-  const theme = localStorage.getItem('bankbet.theme') || 'dark';
+  const txDesc = (t) => (t.type === 'transfer'
+    ? `${t.from || NO_ACCOUNT} → ${t.to || NO_ACCOUNT}`
+    : [TX_TYPES[t.type], t.bookmaker].filter(Boolean).join(' · '));
   view.innerHTML = `
     <div class="stack">
-      <h2>Bankroll e impostazioni</h2>
-      <div class="kpis">
+      <div class="spread"><h2>Bankroll</h2><a class="btn small" href="#settings">${GEAR} Impostazioni</a></div>
+      <div class="kpis bank-kpis">
         ${kpi('Saldo', money(b.balance), `disponibile ${money(b.available)}`)}
         ${kpi('Depositato netto', money(b.deposited), 'depositi − prelievi')}
         ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, b.bonus ? `dalle scommesse · bonus ${money(b.bonus)}` : 'dalle scommesse')}
       </div>
       ${accountsCard()}
-      <div class="grid grid-2">
-        <div class="card stack">
-          <h3>Movimenti</h3>
-          <div class="form-grid">
-            <label class="field">Tipo<select id="txType">${Object.entries(TX_TYPES).map(([k, l]) => `<option value="${k}" ${ui.txType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-            <label class="field">Importo<input id="txAmount" inputmode="decimal"></label>
-            ${ui.txType === 'transfer' ? `
-            <label class="field">Da<input id="txFrom" list="dlAcc" placeholder="${NO_ACCOUNT}"></label>
-            <label class="field">A<input id="txTo" list="dlAcc" placeholder="es. Snai"></label>` : `
-            <label class="field full">Conto (bookmaker)<input id="txBook" list="dlAcc" placeholder="opz. es. Snai"></label>`}
-            <label class="field">Data<input id="txDate" type="date" value="${today()}"></label>
-            <label class="field">Nota<input id="txNote" placeholder="opz."></label>
-          </div>
-          <datalist id="dlAcc">${[...new Set([...distinct('bookmaker'), ...d.transactions.flatMap((t) => [t.bookmaker, t.from, t.to])].filter(Boolean))].sort().map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
-          <button class="btn primary" data-action="add-tx">Registra movimento</button>
-          ${txs.length ? `<div class="table-wrap"><table>
-            ${txs.map((t) => `<tr><td>${fmtDate(t.date)} <span class="muted">${esc(t.type === 'transfer' ? `${t.from || NO_ACCOUNT} → ${t.to || NO_ACCOUNT}` : [TX_TYPES[t.type] !== 'Deposito' && TX_TYPES[t.type] !== 'Prelievo' ? TX_TYPES[t.type] : '', t.bookmaker].filter(Boolean).join(' · '))} ${esc(t.note || '')}</span></td>
-              <td class="${t.type === 'transfer' ? '' : t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'transfer' ? '⇄ ' : t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</td>
-              <td style="width:1%"><button class="btn small ghost" data-action="del-tx" data-id="${t.id}" aria-label="Elimina">✕</button></td></tr>`).join('')}
-          </table></div>` : ''}
+      <div class="card stack">
+        <h3>Nuovo movimento</h3>
+        <div class="form-grid">
+          <label class="field">Tipo<select id="txType">${Object.entries(TX_TYPES).map(([k, l]) => `<option value="${k}" ${ui.txType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="field">Importo<input id="txAmount" inputmode="decimal" placeholder="0,00"></label>
+          ${ui.txType === 'transfer' ? `
+          <label class="field">Da<input id="txFrom" list="dlAcc" placeholder="${NO_ACCOUNT}"></label>
+          <label class="field">A<input id="txTo" list="dlAcc" placeholder="es. Snai"></label>` : `
+          <label class="field full">Conto (bookmaker)<input id="txBook" list="dlAcc" placeholder="opz. es. Bet365"></label>`}
+          <label class="field">Data<input id="txDate" type="date" value="${today()}"></label>
+          <label class="field">Nota<input id="txNote" placeholder="opz."></label>
         </div>
+        <datalist id="dlAcc">${[...new Set([...listOf('bookmakers'), ...distinct('bookmaker'), ...d.transactions.flatMap((t) => [t.bookmaker, t.from, t.to])].filter(Boolean))].sort().map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
+        <button class="btn primary" data-action="add-tx">Registra movimento</button>
+      </div>
+      ${txs.length ? `<div class="card">
+        <div class="card-head"><h3>Movimenti</h3><span class="hint">${txs.length}</span></div>
+        <div class="tx-list">${txs.map((t) => `<div class="tx">
+          <span class="tx-main"><span>${fmtDate(t.date)} · ${esc(txDesc(t))}</span>${t.note ? `<span class="hint">${esc(t.note)}</span>` : ''}</span>
+          <span class="tx-amt big-num ${t.type === 'transfer' ? '' : t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'transfer' ? '⇄ ' : t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</span>
+          <button class="icon-btn small-x" data-action="del-tx" data-id="${t.id}" aria-label="Elimina movimento del ${fmtDate(t.date)}">✕</button>
+        </div>`).join('')}</div></div>` : ''}
+    </div>`;
+  $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
+}
+
+// ---------- IMPOSTAZIONI ----------
+const GEAR = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
+function renderSettings() {
+  const d = store.get();
+  const s = d.settings;
+  const cfg = sync.getConfig();
+  const theme = localStorage.getItem('bankbet.theme') || 'dark';
+  view.innerHTML = `
+    <div class="stack">
+      <h2>Impostazioni</h2>
+      <div class="grid grid-2">
         <div class="card stack">
           <h3>Gestione del rischio</h3>
           <div class="form-grid">
@@ -1541,6 +1633,13 @@ function renderBankroll() {
             <label class="field">Profitto fisso per giocata<input data-setting="targetWin" inputmode="decimal" value="${s.targetWin}"></label>
           </div>
           <div class="hint">Oggi 1 unità vale <strong>${money(currentUnit().unit)}</strong> (riferimento ${money(currentUnit().base)}). Con il profitto fisso la puntata è obiettivo ÷ (quota − 1).</div>
+        </div>
+        <div class="card stack">
+          <h3>Menù della scheda scommessa</h3>
+          ${listEditor('sports')}
+          ${listEditor('markets')}
+          ${listEditor('bookmakers')}
+          <div class="hint">★ indica la voce precompilata in una nuova scommessa. "Altro" è sempre disponibile e apre un campo libero. Togliere una voce non cambia le scommesse già registrate.</div>
         </div>
       </div>
       <div class="grid grid-2">
@@ -1571,18 +1670,11 @@ function renderBankroll() {
             </ol></details>
         </div>
         <div class="card stack">
-          <h3>Menù della scheda scommessa</h3>
-          ${listEditor('sports')}
-          ${listEditor('markets')}
-          ${listEditor('bookmakers')}
-          <div class="hint">★ indica la voce precompilata in una nuova scommessa. "Altro" è sempre disponibile e apre un campo libero. Togliere una voce non cambia le scommesse già registrate.</div>
-        </div>
-        <div class="card stack">
           <h3>Backup e aspetto</h3>
           <div class="row">
             <button class="btn" data-action="export-json">Esporta backup JSON</button>
             <button class="btn" data-action="import-json">Importa backup</button>
-            <button class="btn" data-action="export-csv">Esporta CSV</button>
+            <button class="btn" data-action="export-csv-all">Esporta CSV (tutte)</button>
           </div>
           <input type="file" id="importFile" accept="application/json,.json" hidden>
           <label class="field">Tema
@@ -1604,7 +1696,6 @@ function renderBankroll() {
       toast('Impostazione salvata');
     });
   }
-  $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
   appVersion().then((v) => { if (v && $('#verLine')) $('#verLine').textContent = `BankBet ${v} · si aggiorna da sola: quando esce una versione nuova compare il pulsante "Aggiorna"`; });
   for (const inp of $$('input[id^="add-"]')) {
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.nextElementSibling.click(); } });
@@ -1633,10 +1724,10 @@ function accountsCard() {
   const unassigned = list.find((a) => a.name === NO_ACCOUNT);
   return `<div class="card">
     <div class="card-head"><h3>Conti per bookmaker</h3><span class="hint">${list.filter((a) => a.name !== NO_ACCOUNT).length} conti</span></div>
-    <div class="table-wrap"><table>
-      <tr><th>Conto</th><th>Saldo</th><th>In gioco</th><th>Disponibile</th><th>Profitto scommesse</th><th>Scommesse</th></tr>
-      ${list.map((a) => `<tr><td>${esc(a.name)}</td><td><strong>${money(a.balance)}</strong></td><td>${money(a.pending)}</td>
-        <td class="${a.available < -0.004 ? 'neg' : ''}">${money(a.available)}</td><td class="${cls(a.profit)}">${signed(a.profit)}</td><td>${a.bets}</td></tr>`).join('')}
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table>
+      <tr><th>Conto</th><th>Saldo</th><th class="opt">In gioco</th><th>Disponibile</th><th class="opt">Profitto scommesse</th><th class="opt">Scommesse</th></tr>
+      ${list.map((a) => `<tr><td>${esc(a.name)}</td><td><strong>${money(a.balance)}</strong></td><td class="opt">${money(a.pending)}</td>
+        <td class="${a.available < -0.004 ? 'neg' : ''}">${money(a.available)}</td><td class="opt ${cls(a.profit)}">${signed(a.profit)}</td><td class="opt">${a.bets}</td></tr>`).join('')}
     </table></div>
     ${unassigned && list.length > 1 ? `<div class="hint" style="margin-top:8px">Se un conto risulta negativo, registra il deposito su quel bookmaker o un trasferimento da "${NO_ACCOUNT}" verso di esso.</div>` : ''}
   </div>`;
@@ -1683,7 +1774,8 @@ const actions = {
     ui.betFilter = { q: '', status: 'pending', sport: '', period: '' };
     if (current() === 'bets') render(); else location.hash = 'bets';
   },
-  'export-csv': exportCSV,
+  'export-csv'() { exportCSV(); },
+  'export-csv-all'() { exportCSV(store.get().bets.slice().sort((a, z) => (a.date < z.date ? 1 : -1))); },
   'list-add'(el) {
     const key = el.dataset.list;
     const inp = $(`#add-${key}`);
@@ -1711,6 +1803,12 @@ const actions = {
   'paste-signal'() { openPaste(); },
   'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
   'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
+  'stat-period'(el) { ui.statPeriod = el.dataset.period; render(); },
+  info(el) {
+    const [title, text] = GLOSSARY[el.dataset.k] || [];
+    if (!title) return;
+    openDialog(esc(title), `<p style="margin:0">${esc(text)}</p>`, '<button type="button" class="btn primary" data-close>Ho capito</button>', () => {});
+  },
   'new-masaniello': openMasanielloForm,
   'new-cycle': openCycleForm,
   'sim-run': runSim,
@@ -1869,7 +1967,7 @@ async function runSync(verbose = false) {
 syncBtn.addEventListener('click', () => runSync(true));
 
 store.onError((e) => {
-  ui.storeError = `Impossibile salvare i dati su questo dispositivo (${e.name === 'QuotaExceededError' ? 'memoria del browser piena' : e.message}). Esporta subito un backup da Bankroll → Backup.`;
+  ui.storeError = `Impossibile salvare i dati su questo dispositivo (${e.name === 'QuotaExceededError' ? 'memoria del browser piena' : e.message}). Esporta subito un backup da Impostazioni → Backup.`;
   render();
 });
 

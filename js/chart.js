@@ -231,9 +231,23 @@ function drawLine(canvas, hoverX) {
   tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
 }
 
-export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
+export function barChart(canvas, bars, opts = {}) {
+  canvas._bc = { bars, opts };
+  if (!canvas._bcBound) {
+    canvas._bcBound = true;
+    const move = (e) => { const r = canvas.getBoundingClientRect(); drawBars(canvas, e.clientX - r.left); };
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerdown', move);
+    canvas.addEventListener('pointerleave', () => drawBars(canvas, null));
+  }
+  drawBars(canvas, null);
+}
+
+function drawBars(canvas, hoverX) {
+  const { bars, opts } = canvas._bc;
   const { ctx, w, h, color } = setup(canvas);
-  if (!bars.length) { emptyMsg(ctx, w, h, color, emptyText); return; }
+  const tip = tipEl(canvas);
+  if (!bars.length) { tip.hidden = true; emptyMsg(ctx, w, h, color, opts.emptyText || 'Nessun dato'); return; }
   const pad = { l: 54, r: 12, t: 12, b: 24 };
   const vals = bars.map((b) => b.value);
   const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
@@ -256,11 +270,16 @@ export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
   const slot = (w - pad.l - pad.r) / bars.length;
   const bw = Math.max(2, Math.min(36, slot * 0.7));
   const showEvery = Math.ceil(bars.length / Math.max(1, Math.floor((w - pad.l) / 48)));
+  const hover = hoverX == null ? -1 : Math.floor((hoverX - pad.l) / slot);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   bars.forEach((b, i) => {
     const cx = pad.l + slot * i + slot / 2;
     const y0 = y(0), y1 = y(b.value);
+    if (i === hover) {
+      ctx.fillStyle = rgba(ctx, color('--text'), 0.06);
+      ctx.fillRect(pad.l + slot * i, pad.t, slot, h - pad.t - pad.b);
+    }
     ctx.fillStyle = b.value >= 0 ? color('--pos') : color('--neg');
     const top = Math.min(y0, y1), hh = Math.max(1, Math.abs(y1 - y0));
     ctx.beginPath();
@@ -271,6 +290,15 @@ export function barChart(canvas, bars, { emptyText = 'Nessun dato' } = {}) {
       ctx.fillText(b.label, cx, h - pad.b + 8);
     }
   });
+  if (hover < 0 || hover >= bars.length) { tip.hidden = true; return; }
+  const b = bars[hover];
+  const fv = opts.fmtValue || ((v) => v.toFixed(2));
+  const fl = opts.fmtLabel || ((l) => l);
+  tip.innerHTML = `<div class="d">${fl(b.label)}</div><b class="${b.value >= 0 ? 'pos' : 'neg'}">${fv(b.value)}</b>`;
+  tip.hidden = false;
+  const cx = pad.l + slot * hover + slot / 2;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(cx, half + 2), w - half - 2)}px`;
 }
 
 /**
