@@ -1,5 +1,7 @@
-// Service worker: app shell offline, aggiornamento in background (stale-while-revalidate).
-const CACHE = 'bankbet-v7';
+// Service worker: l'app funziona offline partendo dai file salvati (cache-first).
+// Ogni pubblicazione cambia CACHE: il nuovo service worker scarica i file aggiornati direttamente
+// dal server (senza passare dalla cache HTTP), si attiva subito e l'app mostra "Aggiorna".
+const CACHE = 'bankbet-v8';
 const FONTS = 'bankbet-fonts-v1';
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 const SHELL = [
@@ -9,7 +11,11 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -37,13 +43,18 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   if (url.origin !== location.origin) return; // API GitHub: sempre rete
+  // File dell'app: sempre la versione di questa cache (niente file di versioni diverse mescolati).
   e.respondWith(
     caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(e.request, { ignoreSearch: true });
-      const network = fetch(e.request)
-        .then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; })
-        .catch(() => cached);
-      return cached || network;
+      const hit = await cache.match(e.request, { ignoreSearch: true });
+      if (hit) return hit;
+      try {
+        const res = await fetch(e.request);
+        if (res.ok) cache.put(e.request, res.clone());
+        return res;
+      } catch {
+        return (await cache.match('index.html')) || Response.error();
+      }
     }),
   );
 });

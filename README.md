@@ -61,7 +61,7 @@ Nessuna dipendenza né build: sono file statici.
 python -m http.server 8765
 ```
 
-Poi apri http://localhost:8765. Dopo aver pubblicato una nuova versione, aggiorna `CACHE` in `sw.js`; l'app si aggiorna al riavvio successivo.
+Poi apri http://localhost:8765. Dopo aver pubblicato una nuova versione, aggiorna `CACHE` in `sw.js` (es. `bankbet-v9`): alla prima apertura l'app scarica i file nuovi direttamente dal server e mostra l'avviso *È disponibile una nuova versione* con il pulsante **Aggiorna**. La versione in uso è indicata in fondo alla pagina Bankroll.
 
 ---
 

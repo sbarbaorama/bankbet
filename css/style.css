@@ -417,3 +417,12 @@ details summary { cursor: pointer; font-weight: 600; }
 .chip-edit button[disabled] { opacity: .35; cursor: not-allowed; }
 .chip-edit .star.on { color: var(--accent); }
 .chip-edit.muted { color: var(--muted); border-style: dashed; }
+#updateBar {
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 60;
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 12px);
+  display: flex; align-items: center; gap: 12px; width: min(560px, calc(100vw - 24px));
+  padding: 10px 10px 10px 16px; border-radius: 14px; border: 1px solid var(--accent);
+  background: var(--surface); color: var(--text); font-weight: 500; box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+}
+#updateBar span { flex: 1; }
+@media (min-width: 900px) { #updateBar { bottom: 24px; margin-left: 110px; } }

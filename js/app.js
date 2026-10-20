@@ -1591,6 +1591,7 @@ function renderBankroll() {
           <button class="btn danger" data-action="reset">Cancella tutti i dati locali</button>
         </div>
       </div>
+      <p class="hint" style="text-align:center" id="verLine"></p>
       <p class="hint" style="text-align:center">Gioca responsabilmente. Nessun metodo di staking crea un vantaggio: protegge il bankroll solo se le tue giocate hanno valore. Se il gioco smette di essere un divertimento, chiedi aiuto (Telefono Verde Nazionale per le problematiche legate al Gioco d'Azzardo: 800 558822).</p>
     </div>`;
 
@@ -1604,6 +1605,7 @@ function renderBankroll() {
     });
   }
   $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
+  appVersion().then((v) => { if (v && $('#verLine')) $('#verLine').textContent = `BankBet ${v} · si aggiorna da sola: quando esce una versione nuova compare il pulsante "Aggiorna"`; });
   for (const inp of $$('input[id^="add-"]')) {
     inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.nextElementSibling.click(); } });
   }
@@ -1885,6 +1887,24 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => sync.getConfig().auto && runSync(false));
 
+// ---------- Aggiornamento dell'app ----------
+function showUpdateBanner() {
+  if ($('#updateBar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'updateBar';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = '<span>È disponibile una nuova versione di BankBet</span><button type="button" class="btn small primary">Aggiorna</button>';
+  bar.querySelector('button').addEventListener('click', () => location.reload());
+  document.body.append(bar);
+}
+
+async function appVersion() {
+  try {
+    const k = (await caches.keys()).find((x) => /^bankbet-v\d+$/.test(x));
+    return k ? k.replace('bankbet-', '') : '';
+  } catch { return ''; }
+}
+
 // ---------- Tema / avvio ----------
 function applyTheme() {
   const t = localStorage.getItem('bankbet.theme');
@@ -1911,5 +1931,15 @@ updateSyncBtn();
 if (sync.getConfig().auto) runSync(false);
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Se mentre l'app è aperta si attiva una versione nuova, si mostra l'avviso "Aggiorna".
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController) showUpdateBanner();
+  });
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    // Controlla gli aggiornamenti anche quando l'app torna in primo piano (su telefono resta aperta a lungo).
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+    });
+  }).catch(() => {});
 }
