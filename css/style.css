@@ -409,3 +409,11 @@ details summary { cursor: pointer; font-weight: 600; }
 #toast button { color: #7A4E00; }
 :root[data-theme="light"] #toast button { color: #FFD27A; }
 @media (prefers-color-scheme: light) { :root[data-theme="auto"] #toast button { color: #FFD27A; } }
+.field-stack { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.chip-edit { display: inline-flex; align-items: center; gap: 2px; min-height: 36px; padding: 0 4px; border: 1px solid var(--border-2); border-radius: 999px; background: var(--surface-2); font-size: .88rem; }
+.chip-edit > span { padding: 0 6px; }
+.chip-edit button { border: 0; background: transparent; color: var(--muted); font: inherit; min-width: 32px; min-height: 32px; border-radius: 999px; cursor: pointer; }
+.chip-edit button:hover:not([disabled]) { color: var(--text); background: var(--border); }
+.chip-edit button[disabled] { opacity: .35; cursor: not-allowed; }
+.chip-edit .star.on { color: var(--accent); }
+.chip-edit.muted { color: var(--muted); border-style: dashed; }

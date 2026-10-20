@@ -325,6 +325,9 @@ function renderHome() {
   const todayP = profitBetween(today());
   const todayN = d.bets.filter((x) => C.isSettled(x) && (x.settledDate || x.date) === today()).length;
   const periodP = profitBetween(from || '0000-00-00');
+  const monthStart = today().slice(0, 8) + '01';
+  const monthP = profitBetween(monthStart);
+  const monthN = d.bets.filter((x) => C.isSettled(x) && (x.settledDate || x.date) >= monthStart).length;
   const pending = d.bets.filter((x) => !C.isSettled(x)).sort((a, z) => (a.date < z.date ? -1 : 1));
   const activeM = d.masaniello.map((m) => ({ m, ...masanielloInfo(m) })).filter((x) => x.state?.status === 'active');
   const activeC = d.cycles.map((c) => ({ c, ...cycleInfo(c) })).filter((x) => x.state.status === 'active');
@@ -373,7 +376,7 @@ function renderHome() {
           <div class="kpis two">
             ${kpi('Yield', `<span class="${cls(sum.yield)}">${sum.yield > 0 ? '+' : ''}${pct(sum.yield)}</span>`, `su ${money(sum.staked)} giocati`)}
             ${kpi('Win rate', pct(sum.winRate, 0), `${sum.settled} chiuse · q. media ${sum.avgOdds ? fmtOdds(sum.avgOdds) : '—'}`)}
-            ${kpi('CLV', sum.clv == null ? '—' : `<span class="${cls(sum.clv)}">${sum.clv > 0 ? '+' : ''}${pct(sum.clv)}</span>`, sum.clvN ? `su ${sum.clvN} scommesse` : 'aggiungi la quota di chiusura')}
+            ${kpi('Profitto del mese', `<span class="${cls(monthP)}">${signed(monthP)}</span>`, `${monthN} ${monthN === 1 ? 'chiusa' : 'chiuse'} da inizio mese`)}
             ${kpi('Max drawdown', `<span class="${series.maxDrawdown > 0 ? 'neg' : ''}">${series.maxDrawdown > 0 ? '−' : ''}${money(series.maxDrawdown)}</span>`, `serie attuale ${st.current}`)}
           </div>
           ${limitsCard()}
@@ -644,6 +647,34 @@ function datalist(id, field) {
   return `<datalist id="${id}">${distinct(field).map((x) => `<option value="${esc(x)}">`).join('')}</datalist>`;
 }
 
+// ---------- Menù a tendina con "Altro" (sport, bookmaker) ----------
+const OTHER = '__altro';
+const LISTS = { sports: { def: 'defaultSport', title: 'Sport' }, bookmakers: { def: 'defaultBookmaker', title: 'Bookmaker' } };
+
+function listOf(key) {
+  const l = store.get().settings[key];
+  return Array.isArray(l) && l.length ? l : store.emptyData().settings[key];
+}
+
+function defaultOf(key) {
+  const l = listOf(key);
+  const d = store.get().settings[LISTS[key].def];
+  return l.includes(d) ? d : l[0];
+}
+
+// Menù con le voci della lista più "Altro"; un valore non in elenco apre "Altro" già compilato.
+function choiceField(label, name, list, value, placeholder) {
+  const isOther = value != null && !list.includes(value);
+  return `<div class="field-stack">
+    <label class="field">${label}
+      <select name="${name}Sel" data-choice="${name}">${list.map((x) => `<option ${x === value ? 'selected' : ''}>${esc(x)}</option>`).join('')}
+        <option value="${OTHER}" ${isOther ? 'selected' : ''}>Altro</option></select></label>
+    <input name="${name}Other" value="${isOther ? esc(value) : ''}" placeholder="${placeholder}" aria-label="${label}: altro" ${isOther ? '' : 'hidden'}>
+  </div>`;
+}
+
+const choiceValue = (fd, name) => (fd[`${name}Sel`] === OTHER ? fd[`${name}Other`] || '' : fd[`${name}Sel`] || '').trim();
+
 function legRow(l = {}) {
   return `<div class="leg">
     <input data-leg="event" value="${esc(l.event || '')}" placeholder="Evento" aria-label="Evento">
@@ -669,7 +700,8 @@ function openBet(id, preset = {}) {
   const d = store.get();
   const existing = id ? d.bets.find((b) => b.id === id) : null;
   const b = existing || {
-    date: today(), status: 'pending', strategy: d.settings.lastStrategy || 'flat', bookmaker: d.settings.lastBookmaker || '', ...preset,
+    date: today(), status: 'pending', strategy: d.settings.lastStrategy || 'flat',
+    sport: defaultOf('sports'), bookmaker: defaultOf('bookmakers'), ...preset,
   };
   const activeM = d.masaniello.filter((m) => masanielloInfo(m).state?.status === 'active' || m.id === b.masanielloId);
   const activeC = d.cycles.filter((c) => cycleInfo(c).state.status === 'active' || c.id === b.cycleId);
@@ -679,7 +711,7 @@ function openBet(id, preset = {}) {
   const body = `
     <div class="form-grid three">
       <label class="field">Data<input type="date" name="date" value="${v('date')}" required></label>
-      <label class="field">Sport<input name="sport" list="dlSport" value="${v('sport')}" placeholder="Calcio"></label>
+      ${choiceField('Sport', 'sport', listOf('sports'), b.sport ?? '', 'Scrivi lo sport')}
       <label class="field">Competizione<input name="competition" list="dlComp" value="${v('competition')}" placeholder="Serie A"></label>
       <label class="row full" style="font-size:.9rem;gap:16px">
         <span class="row" style="gap:6px"><input type="checkbox" name="isMulti" value="1" ${isMulti ? 'checked' : ''} style="width:auto;min-height:0"> Multipla</span>
@@ -692,10 +724,9 @@ function openBet(id, preset = {}) {
       </div>
       <label class="field single">Mercato<input name="market" list="dlMarket" value="${isMulti ? '' : v('market')}" placeholder="1X2"></label>
       <label class="field single">Selezione<input name="selection" value="${isMulti ? '' : v('selection')}" placeholder="1"></label>
-      <label class="field">Bookmaker<input name="bookmaker" list="dlBook" value="${v('bookmaker')}"></label>
+      ${choiceField('Bookmaker', 'bookmaker', listOf('bookmakers'), b.bookmaker ?? '', 'Scrivi il bookmaker')}
       <label class="field">Quota<input name="odds" inputmode="decimal" value="${v('odds')}" required placeholder="1,85"></label>
-      <label class="field">Prob. stimata %<input name="prob" inputmode="decimal" value="${v('prob')}" placeholder="opz."></label>
-      <label class="field">Quota chiusura<input name="closingOdds" inputmode="decimal" value="${v('closingOdds')}" placeholder="opz. (CLV)"></label>
+      <label class="field" id="probF">Prob. stimata %<input name="prob" inputmode="decimal" value="${v('prob')}" placeholder="per Kelly"></label>
     </div>
     <div class="form-grid">
       <label class="field">Strategia
@@ -728,7 +759,7 @@ function openBet(id, preset = {}) {
       <label class="field full">Tag<input name="tags" value="${v('tags')}" placeholder="es. live, multipla, tipster X"></label>
       <label class="field full">Note<textarea name="notes">${v('notes')}</textarea></label>
     </div>
-    ${datalist('dlSport', 'sport')}${datalist('dlComp', 'competition')}${datalist('dlMarket', 'market')}${datalist('dlBook', 'bookmaker')}`;
+    ${datalist('dlComp', 'competition')}${datalist('dlMarket', 'market')}`;
   const foot = `
     ${existing ? `<button type="submit" value="delete" class="btn danger left" formnovalidate>Elimina</button>
       <button type="submit" value="dup" class="btn">Duplica</button>` : ''}
@@ -753,10 +784,10 @@ function openBet(id, preset = {}) {
     if (fd.strategy === 'cycle' && !fd.cycleId) { alert('Seleziona il ciclo a cui collegare la scommessa'); return false; }
     const item = {
       ...(existing || {}),
-      date: fd.date || today(), sport: fd.sport.trim(), competition: fd.competition.trim(),
+      date: fd.date || today(), sport: choiceValue(fd, 'sport'), competition: fd.competition.trim(),
       event: fd.event.trim() || (legs.length ? legs.map((l) => l.event || l.selection).filter(Boolean).join(' + ') : ''),
-      market: legs.length ? 'Multipla' : fd.market.trim(), selection: legs.length ? `${legs.length} selezioni` : fd.selection.trim(), bookmaker: fd.bookmaker.trim(),
-      odds: legs.length ? C.round2(C.legsOdds(legs)) : odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: num(fd.closingOdds) || '',
+      market: legs.length ? 'Multipla' : fd.market.trim(), selection: legs.length ? `${legs.length} selezioni` : fd.selection.trim(), bookmaker: choiceValue(fd, 'bookmaker'),
+      odds: legs.length ? C.round2(C.legsOdds(legs)) : odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: existing?.closingOdds ?? '',
       strategy: fd.strategy, masanielloId: fd.strategy === 'masaniello' ? fd.masanielloId : '',
       cycleId: fd.strategy === 'cycle' ? fd.cycleId : '', confidence: fd.strategy === 'units' ? +fd.confidence || 1 : '',
       status: fd.status, payout: fd.status === 'cashout' ? num(fd.payout) || 0 : '',
@@ -779,8 +810,16 @@ function openBet(id, preset = {}) {
   });
 
   const f = dlgForm;
+  const hadProb = !!b.prob;
   const update = () => {
     const fd = Object.fromEntries(new FormData(f));
+    for (const sel of $$('select[data-choice]', f)) {
+      const other = f[`${sel.dataset.choice}Other`];
+      const show = sel.value === OTHER;
+      if (show && other.hidden) setTimeout(() => other.focus(), 0);
+      other.hidden = !show;
+    }
+    $('#probF').style.display = fd.strategy === 'kelly' || hadProb || num(fd.prob) > 0 ? '' : 'none';
     const multi = !!fd.isMulti;
     $('#legsBox').hidden = !multi;
     for (const el of $$('.single', f)) el.style.display = multi ? 'none' : '';
@@ -817,7 +856,7 @@ function openBet(id, preset = {}) {
     let ret = odds > 1 && stake > 0
       ? (fd.freebet ? `Freebet: se vince incassi ${money(stake * (odds - 1))}, se perde non perdi nulla` : `Vincita potenziale ${money(stake * odds)} (netto ${signed(stake * (odds - 1))})`)
       : '';
-    const book = fd.bookmaker.trim();
+    const book = choiceValue(fd, 'bookmaker');
     if (book && usesAccounts()) {
       const a = accounts().find((x) => x.name === book);
       const own = existing && !C.isSettled(existing) && existing.bookmaker === book ? C.realStake(existing) : 0;
@@ -1405,7 +1444,7 @@ function renderStats() {
         ${kpi('Yield', `<span class="${cls(s.yield)}">${pct(s.yield, 2)}</span>`, `giocato ${money(s.staked)}`)}
         ${kpi('Puntata media', money(s.avgStake), `quota media ${s.avgOdds ? s.avgOdds.toFixed(2) : '—'}`)}
         ${kpi('Serie', st.current, `max ${st.maxW} vinte · ${st.maxL} perse`)}
-        ${kpi('CLV medio', s.clv == null ? '—' : `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, s.clvN ? `su ${s.clvN} scommesse` : 'inserisci la quota di chiusura')}
+        ${s.clvN ? kpi('CLV medio', `<span class="${cls(s.clv)}">${pct(s.clv, 2)}</span>`, `su ${s.clvN} scommesse`) : kpi('Win rate', pct(s.winRate, 0), `quota media ${s.avgOdds ? fmtOdds(s.avgOdds) : '—'}`)}
         ${kpi('Max drawdown', money(maxDrawdown), 'dal picco di profitto')}
       </div>
       <div class="card"><h3>Profitto mensile</h3><canvas class="chart" id="chMonth"></canvas></div>
@@ -1528,6 +1567,12 @@ function renderBankroll() {
             </ol></details>
         </div>
         <div class="card stack">
+          <h3>Menù della scheda scommessa</h3>
+          ${listEditor('sports')}
+          ${listEditor('bookmakers')}
+          <div class="hint">★ indica la voce precompilata in una nuova scommessa. "Altro" è sempre disponibile e apre un campo libero. Togliere una voce non cambia le scommesse già registrate.</div>
+        </div>
+        <div class="card stack">
           <h3>Backup e aspetto</h3>
           <div class="row">
             <button class="btn" data-action="export-json">Esporta backup JSON</button>
@@ -1554,8 +1599,25 @@ function renderBankroll() {
     });
   }
   $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
+  for (const inp of $$('input[id^="add-"]')) {
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); inp.nextElementSibling.click(); } });
+  }
   $('#themeSel').addEventListener('change', (e) => { localStorage.setItem('bankbet.theme', e.target.value); applyTheme(); render(); });
   $('#importFile').addEventListener('change', importJSON);
+}
+
+function listEditor(key) {
+  const list = listOf(key);
+  const def = defaultOf(key);
+  return `<div class="stack" style="gap:8px">
+    <div class="label-caps">${LISTS[key].title}</div>
+    <div class="row" style="gap:6px">${list.map((x, i) => `<span class="chip-edit">
+      <button type="button" class="star ${x === def ? 'on' : ''}" data-action="list-default" data-list="${key}" data-i="${i}" aria-label="Precompila ${esc(x)}" aria-pressed="${x === def}">${x === def ? '★' : '☆'}</button>
+      <span>${esc(x)}</span>
+      <button type="button" data-action="list-del" data-list="${key}" data-i="${i}" aria-label="Togli ${esc(x)}" ${list.length < 2 ? 'disabled' : ''}>✕</button></span>`).join('')}
+      <span class="chip-edit muted"><span>Altro</span></span></div>
+    <div class="row" style="flex-wrap:nowrap"><input id="add-${key}" placeholder="Nuova voce" maxlength="40" style="max-width:240px"><button type="button" class="btn small" data-action="list-add" data-list="${key}">Aggiungi</button></div>
+  </div>`;
 }
 
 function accountsCard() {
@@ -1615,6 +1677,30 @@ const actions = {
     if (current() === 'bets') render(); else location.hash = 'bets';
   },
   'export-csv': exportCSV,
+  'list-add'(el) {
+    const key = el.dataset.list;
+    const inp = $(`#add-${key}`);
+    const v = inp.value.trim();
+    const list = listOf(key);
+    if (!v) return;
+    if (v.toLowerCase() === 'altro' || list.some((x) => x.toLowerCase() === v.toLowerCase())) { toast('Voce già presente'); return; }
+    store.updateSettings({ [key]: [...list, v] });
+    toast(`Aggiunto: ${v}`);
+  },
+  'list-del'(el) {
+    const key = el.dataset.list;
+    const list = listOf(key);
+    if (list.length < 2) return;
+    const gone = list[+el.dataset.i];
+    const prevDef = defaultOf(key);
+    const next = list.filter((_, i) => i !== +el.dataset.i);
+    store.updateSettings({ [key]: next, [LISTS[key].def]: prevDef === gone ? next[0] : prevDef });
+    toast(`Tolto: ${gone}`, () => store.updateSettings({ [key]: list, [LISTS[key].def]: prevDef }));
+  },
+  'list-default'(el) {
+    const key = el.dataset.list;
+    store.updateSettings({ [LISTS[key].def]: listOf(key)[+el.dataset.i] });
+  },
   'paste-signal'() { openPaste(); },
   'tool-tab'(el) { ui.toolTab = el.dataset.tab; if (current() === 'tools') render(); },
   'stat-group'(el) { ui.statGroup = el.dataset.group; render(); },
