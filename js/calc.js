@@ -14,11 +14,33 @@ export function round2(x) {
   return Math.round((x + Number.EPSILON) * 100) / 100;
 }
 
+// Incasso "da quota" di una scommessa vinta o mezza vinta (senza bonus).
+// Per una freebet l'incasso è solo la vincita netta: la puntata non torna.
+export function standardPayout(b) {
+  const s = +b.stake || 0;
+  const o = +b.odds || 0;
+  if (b.status === 'won') return b.freebet ? s * (o - 1) : s * o;
+  if (b.status === 'half_won') return b.freebet ? (s / 2) * (o - 1) : s / 2 + (s / 2) * o;
+  return 0;
+}
+
+// Vincita incassata scritta a mano (es. comprende un bonus multipla): vale per vinte e mezze vinte.
+export function hasCustomPayout(b) {
+  return (b.status === 'won' || b.status === 'half_won') && b.payout !== '' && b.payout != null
+    && Number.isFinite(+b.payout) && +b.payout >= 0;
+}
+
+// Differenza tra la vincita incassata e quella da quota (il bonus); 0 se non c'è.
+export function betBonus(b) {
+  return hasCustomPayout(b) ? +b.payout - standardPayout(b) : 0;
+}
+
 // Profitto netto di una scommessa (0 se ancora in corso).
 // Con una freebet la puntata non è denaro tuo: se perdi non perdi nulla, se vinci incassi solo la vincita netta.
 export function betProfit(b) {
   const s = +b.stake || 0;
   const o = +b.odds || 0;
+  if (hasCustomPayout(b)) return b.freebet ? +b.payout : +b.payout - s;
   if (b.freebet) {
     switch (b.status) {
       case 'won': return s * (o - 1);

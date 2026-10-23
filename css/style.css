@@ -499,3 +499,5 @@ details.more[open] { padding-bottom: 12px; }
 }
 /* spazio per il pulsante + in fondo alle pagine su telefono */
 @media (max-width: 899px) { main { padding-bottom: 96px; } }
+.bonus-tag { font-size: .75rem; color: var(--pos); font-weight: 600; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

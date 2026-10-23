@@ -66,7 +66,7 @@ function download(name, text, type) {
 
 // ---------- Derivati ----------
 const txDelta = (t) => (t.type === 'transfer' ? 0 : t.type === 'withdrawal' ? -t.amount : +t.amount);
-const TX_TYPES = { deposit: 'Deposito', withdrawal: 'Prelievo', bonus: 'Bonus accreditato', transfer: 'Trasferimento' };
+const TX_TYPES = { deposit: 'Deposito', withdrawal: 'Prelievo', bonus: 'Bonus accreditato', transfer: 'Trasferimento', adjust: 'Rettifica saldo' };
 const NO_ACCOUNT = 'Non assegnato';
 
 function balances() {
@@ -76,7 +76,8 @@ function balances() {
   const profit = d.bets.reduce((a, b) => a + C.betProfit(b), 0);
   const pendingStake = d.bets.filter((b) => !C.isSettled(b)).reduce((a, b) => a + C.realStake(b), 0);
   const balance = tx + profit;
-  return { balance, available: balance - pendingStake, pendingStake, deposited: tx - bonus, bonus, profit };
+  const adjust = d.transactions.filter((t) => t.type === 'adjust').reduce((a, t) => a + +t.amount, 0);
+  return { balance, available: balance - pendingStake, pendingStake, deposited: tx - bonus - adjust, bonus, adjust, profit };
 }
 
 // Saldo per conto (bookmaker): movimenti, trasferimenti e scommesse con quel bookmaker.
@@ -229,6 +230,8 @@ const ui = {
   simResult: null,
   homePeriod: '30',
   txType: 'deposit',
+  txBook: '',
+  focusTx: false,
   calMonth: null,
 };
 
@@ -545,7 +548,7 @@ function betItem(b) {
         <div class="odds">${fmtOdds(b.odds)}</div>
       </div>
       <div class="t-foot"><span>Puntata <b>${money(b.stake)}</b></span>${settled
-        ? `<span>Esito <b class="${cls(p)}">${signed(p)}</b></span>`
+        ? `<span>Esito <b class="${cls(p)}">${signed(p)}</b>${C.betBonus(b) > 0.004 ? ` <span class="bonus-tag">bonus ${signed(C.betBonus(b))}</span>` : ''}</span>`
         : `<span>Vincita <b>${money((+b.stake || 0) * ((+b.odds || 0) - (b.freebet ? 1 : 0)))}</b></span>`}</div>
       ${!settled && !isMulti ? `<div class="quick">
         <button class="btn ok" data-action="settle" data-id="${b.id}" data-status="won">✓ Vinta</button>
@@ -560,7 +563,8 @@ function betRow(b) {
   const p = C.betProfit(b);
   const isMulti = !!(b.legs && b.legs.length);
   const pick = isMulti ? `Multipla ×${b.legs.length}` : [b.market, b.selection].filter(Boolean).join(': ');
-  const meta = [pick, b.bookmaker, b.freebet ? 'Freebet' : ''].filter(Boolean).join(' · ');
+  const bonus = C.betBonus(b);
+  const meta = [pick, b.bookmaker, b.freebet ? 'Freebet' : '', bonus > 0.004 ? `bonus ${signed(bonus)}` : ''].filter(Boolean).join(' · ');
   const res = b.status === 'void' ? 'Rimborsata' : b.status === 'cashout' ? `Cashout ${signed(p)}` : signed(p);
   return `<button type="button" class="bet-row" data-action="edit-bet" data-id="${b.id}" aria-label="${esc(`${b.event || 'Scommessa'}, ${C.STATUSES[b.status]}, ${signed(p)}`)}">
     <span class="dot ${b.status}" aria-hidden="true"></span>
@@ -653,7 +657,7 @@ function renderBets() {
 }
 
 function exportCSV(list = filteredBets()) {
-  const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Cashout', 'Profitto', 'Strategia', 'Prob. stimata %', 'Freebet', 'Selezioni multipla', 'Tag', 'Note']];
+  const rows = [['Data', 'Data esito', 'Sport', 'Competizione', 'Evento', 'Mercato', 'Selezione', 'Bookmaker', 'Quota', 'Quota chiusura', 'Puntata', 'Esito', 'Incasso', 'Profitto', 'Strategia', 'Prob. stimata %', 'Freebet', 'Selezioni multipla', 'Tag', 'Note']];
   const n = (x) => (x === '' || x == null || Number.isNaN(+x) ? '' : String(+x).replace('.', ','));
   for (const b of list) {
     rows.push([b.date, b.settledDate || '', b.sport, b.competition, b.event, b.market, b.selection, b.bookmaker,
@@ -800,7 +804,7 @@ function openBet(id, preset = {}) {
       ${choiceField('Bookmaker', 'bookmaker', listOf('bookmakers'), b.bookmaker ?? '', 'Scrivi il bookmaker')}
       <label class="field">Esito
         <select name="status">${Object.entries(C.STATUSES).map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      <label class="field" id="payoutF">Incasso cashout<input name="payout" inputmode="decimal" value="${dv('payout')}"></label>
+      <label class="field" id="payoutF"><span id="payoutLbl">Vincita incassata</span><input name="payout" inputmode="decimal" value="${dv('payout')}"></label>
       <label class="field" id="settledF">Data esito<input type="date" name="settledDate" value="${v('settledDate')}"></label>
     </div>
     <div id="retLine" class="hint"></div>
@@ -845,7 +849,9 @@ function openBet(id, preset = {}) {
       odds: legs.length ? C.round2(C.legsOdds(legs)) : odds, stake: C.round2(stake), prob: num(fd.prob) || '', closingOdds: existing?.closingOdds ?? '',
       strategy: fd.strategy, masanielloId: fd.strategy === 'masaniello' ? fd.masanielloId : '',
       cycleId: fd.strategy === 'cycle' ? fd.cycleId : '', confidence: fd.strategy === 'units' ? +fd.confidence || 1 : '',
-      status: fd.status, payout: fd.status === 'cashout' ? num(fd.payout) || 0 : '',
+      status: fd.status,
+      payout: fd.status === 'cashout' ? num(fd.payout) || 0
+        : (fd.status === 'won' || fd.status === 'half_won') && String(fd.payout || '').trim() !== '' && num(fd.payout) >= 0 ? C.round2(num(fd.payout)) : '',
       settledDate: fd.status === 'pending' ? '' : fd.settledDate || today(),
       tags: fd.tags.trim(), notes: fd.notes.trim(),
       freebet: !!fd.freebet, legs, source: b.source || '',
@@ -866,6 +872,7 @@ function openBet(id, preset = {}) {
 
   const f = dlgForm;
   const hadProb = !!b.prob;
+  let prevPayKind = null;
   const update = () => {
     const fd = Object.fromEntries(new FormData(f));
     for (const sel of $$('select[data-choice]', f)) {
@@ -891,7 +898,14 @@ function openBet(id, preset = {}) {
     $('#mSel').style.display = fd.strategy === 'masaniello' ? '' : 'none';
     $('#cSel').style.display = fd.strategy === 'cycle' ? '' : 'none';
     $('#confF').style.display = fd.strategy === 'units' ? '' : 'none';
-    $('#payoutF').style.display = fd.status === 'cashout' ? '' : 'none';
+    // Vincita incassata: per vinte/mezze vinte è facoltativa (vuota = puntata × quota), per il cashout obbligatoria.
+    const payKind = fd.status === 'cashout' ? 'cashout' : fd.status === 'won' || fd.status === 'half_won' ? 'win' : '';
+    if (prevPayKind !== null && payKind !== prevPayKind) f.payout.value = '';
+    prevPayKind = payKind;
+    $('#payoutF').style.display = payKind ? '' : 'none';
+    $('#payoutLbl').textContent = payKind === 'cashout' ? 'Incasso cashout' : 'Vincita incassata (con bonus)';
+    const stdPay = C.standardPayout({ status: fd.status, stake: num(fd.stake), odds: num(fd.odds), freebet: !!fd.freebet });
+    f.payout.placeholder = payKind === 'win' && stdPay > 0 ? fmt(stdPay) : '';
     $('#settledF').style.display = fd.status === 'pending' ? 'none' : '';
     const sg = suggestStake(fd, existing?.id);
     lastSuggest = sg.amount;
@@ -917,6 +931,10 @@ function openBet(id, preset = {}) {
       const own = existing && !C.isSettled(existing) && existing.bookmaker === book ? C.realStake(existing) : 0;
       const avail = (a ? a.available : 0) + own;
       ret += `${ret ? ' · ' : ''}Disponibile su ${book}: ${money(avail)}${!fd.freebet && stake > avail + 0.005 ? ' ⚠ saldo del conto insufficiente' : ''}`;
+    }
+    if ((fd.status === 'won' || fd.status === 'half_won') && String(fd.payout || '').trim() !== '' && num(fd.payout) >= 0) {
+      const bonus = num(fd.payout) - stdPay;
+      ret += `${ret ? ' · ' : ''}${Math.abs(bonus) < 0.005 ? 'Nessun bonus' : bonus > 0 ? `Bonus incluso ${signed(bonus)}` : `Incassato ${money(-bonus)} in meno della quota`}`;
     }
     $('#retLine').textContent = ret;
     $('#detSum').textContent = [fmtDate(fd.date), choiceValue(fd, 'sport'), fd.competition.trim()].filter(Boolean).join(' · ');
@@ -1511,6 +1529,8 @@ function renderStats() {
     return m.set(k, g);
   }, new Map()).values()].sort((a, b) => b.n - a.n);
   const bonusTot = d.transactions.filter((t) => t.type === 'bonus' && (!from || t.date >= from)).reduce((a, t) => a + +t.amount, 0);
+  const winBonus = bets.reduce((a, b) => a + C.betBonus(b), 0);
+  const winBonusN = bets.filter((b) => C.betBonus(b) > 0.004).length;
   const withProb = bets.filter((b) => C.isSettled(b) && +b.prob > 0 && b.status !== 'void');
   const actualProb = withProb.reduce((a, b) => a + C.betProfit(b), 0);
 
@@ -1526,7 +1546,11 @@ function renderStats() {
         ${kpi('Max drawdown', `<span class="${maxDrawdown > 0 ? 'neg' : ''}">${maxDrawdown > 0 ? '−' : ''}${money(maxDrawdown)}</span>`, 'dal picco di profitto', 'drawdown')}
       </div>
       <div class="card"><h3>Profitto mensile</h3><div class="chart-wrap"><canvas class="chart" id="chMonth" role="img" aria-label="Profitto per mese"></canvas></div></div>
-      ${bonusTot || s.freebetN ? `<div class="card"><h3>Bonus e freebet</h3><p class="hint" style="margin:0">Bonus accreditati <strong>${money(bonusTot)}</strong> · freebet giocate <strong>${s.freebetN}</strong> con profitto <strong class="${cls(s.freebetProfit)}">${signed(s.freebetProfit)}</strong>. Lo yield considera solo le giocate con denaro reale.</p></div>` : ''}
+      ${bonusTot || s.freebetN || winBonusN ? `<div class="card"><h3>Bonus e freebet</h3><p class="hint" style="margin:0">${[
+        bonusTot ? `Bonus accreditati sul conto <strong>${money(bonusTot)}</strong>` : '',
+        winBonusN ? `bonus sulle vincite <strong class="pos">${signed(winBonus)}</strong> (${winBonusN} ${winBonusN === 1 ? 'scommessa' : 'scommesse'})` : '',
+        s.freebetN ? `freebet giocate <strong>${s.freebetN}</strong> con profitto <strong class="${cls(s.freebetProfit)}">${signed(s.freebetProfit)}</strong>` : '',
+      ].filter(Boolean).join(' · ')}. I bonus sulle vincite sono già compresi nel profitto e nello yield; le freebet sono escluse dallo yield.</p></div>` : ''}
       ${legGroups.length ? `<div class="card"><h3>Selezioni delle multiple</h3>
         <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table><tr><th>Mercato</th><th>Selezioni</th><th>Vinte</th><th>% vinte</th><th>Quota media</th><th>% implicita</th></tr>
         ${legGroups.map((g) => `<tr><td>${esc(g.key)}</td><td>${g.n}</td><td>${g.won}</td><td class="${cls(g.won / g.n - g.n / g.odds)}">${pct(g.won / g.n, 0)}</td><td>${fmtOdds(g.odds / g.n)}</td><td>${pct(g.n / g.odds, 0)}</td></tr>`).join('')}
@@ -1566,18 +1590,19 @@ function renderBankroll() {
       <div class="kpis bank-kpis">
         ${kpi('Saldo', money(b.balance), `disponibile ${money(b.available)}`)}
         ${kpi('Depositato netto', money(b.deposited), 'depositi − prelievi')}
-        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, b.bonus ? `dalle scommesse · bonus ${money(b.bonus)}` : 'dalle scommesse')}
+        ${kpi('Profitto', `<span class="${cls(b.profit)}">${signed(b.profit)}</span>`, ['dalle scommesse', b.bonus ? `bonus ${money(b.bonus)}` : '', Math.abs(b.adjust) > 0.004 ? `rettifiche ${signed(b.adjust)}` : ''].filter(Boolean).join(' · '))}
       </div>
       ${accountsCard()}
       <div class="card stack">
         <h3>Nuovo movimento</h3>
         <div class="form-grid">
           <label class="field">Tipo<select id="txType">${Object.entries(TX_TYPES).map(([k, l]) => `<option value="${k}" ${ui.txType === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-          <label class="field">Importo<input id="txAmount" inputmode="decimal" placeholder="0,00"></label>
+          <label class="field">${ui.txType === 'adjust' ? 'Saldo reale del conto' : 'Importo'}<input id="txAmount" inputmode="decimal" placeholder="0,00"></label>
           ${ui.txType === 'transfer' ? `
           <label class="field">Da<input id="txFrom" list="dlAcc" placeholder="${NO_ACCOUNT}"></label>
           <label class="field">A<input id="txTo" list="dlAcc" placeholder="es. Snai"></label>` : `
-          <label class="field full">Conto (bookmaker)<input id="txBook" list="dlAcc" placeholder="opz. es. Bet365"></label>`}
+          <label class="field full">Conto (bookmaker)<input id="txBook" list="dlAcc" value="${esc(ui.txBook || '')}" placeholder="${ui.txType === 'adjust' ? 'vuoto = saldo totale' : 'opz. es. Bet365'}"></label>`}
+          ${ui.txType === 'adjust' ? '<div class="hint full" id="txHint"></div>' : ''}
           <label class="field">Data<input id="txDate" type="date" value="${today()}"></label>
           <label class="field">Nota<input id="txNote" placeholder="opz."></label>
         </div>
@@ -1588,11 +1613,31 @@ function renderBankroll() {
         <div class="card-head"><h3>Movimenti</h3><span class="hint">${txs.length}</span></div>
         <div class="tx-list">${txs.map((t) => `<div class="tx">
           <span class="tx-main"><span>${fmtDate(t.date)} · ${esc(txDesc(t))}</span>${t.note ? `<span class="hint">${esc(t.note)}</span>` : ''}</span>
-          <span class="tx-amt big-num ${t.type === 'transfer' ? '' : t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'transfer' ? '⇄ ' : t.type === 'withdrawal' ? '−' : '+'}${money(t.amount)}</span>
+          <span class="tx-amt big-num ${t.type === 'transfer' ? '' : t.type === 'adjust' ? cls(t.amount) : t.type === 'withdrawal' ? 'neg' : 'pos'}">${t.type === 'transfer' ? '⇄ ' + money(t.amount) : t.type === 'adjust' ? signed(t.amount) : (t.type === 'withdrawal' ? '−' : '+') + money(t.amount)}</span>
           <button class="icon-btn small-x" data-action="del-tx" data-id="${t.id}" aria-label="Elimina movimento del ${fmtDate(t.date)}">✕</button>
         </div>`).join('')}</div></div>` : ''}
     </div>`;
   $('#txType').addEventListener('change', (e) => { ui.txType = e.target.value; render(); });
+  if (ui.txType === 'adjust') {
+    // mostra il saldo che BankBet conosce, così si vede subito la differenza
+    const hint = () => {
+      const book = $('#txBook').value.trim();
+      const cur = currentBalanceOf(book);
+      const real = num($('#txAmount').value);
+      $('#txHint').textContent = `Saldo in BankBet ${book ? `su ${book}` : 'totale'}: ${money(cur)}`
+        + (Number.isFinite(real) ? ` · verrà registrata una rettifica di ${signed(real - cur)}` : ' · scrivi il saldo che vedi sul sito del bookmaker');
+    };
+    $('#txBook').addEventListener('input', hint);
+    $('#txAmount').addEventListener('input', hint);
+    hint();
+    if (ui.focusTx) { ui.focusTx = false; $('#txAmount').focus(); $('#txAmount').scrollIntoView({ block: 'center' }); }
+  }
+}
+
+// Saldo di un conto (o totale se il nome è vuoto), comprese le puntate in corso.
+function currentBalanceOf(book) {
+  if (!book) return balances().balance;
+  return accounts().find((a) => a.name === book)?.balance ?? 0;
 }
 
 // ---------- IMPOSTAZIONI ----------
@@ -1725,11 +1770,12 @@ function accountsCard() {
   return `<div class="card">
     <div class="card-head"><h3>Conti per bookmaker</h3><span class="hint">${list.filter((a) => a.name !== NO_ACCOUNT).length} conti</span></div>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Tabella scorrevole"><table>
-      <tr><th>Conto</th><th>Saldo</th><th class="opt">In gioco</th><th>Disponibile</th><th class="opt">Profitto scommesse</th><th class="opt">Scommesse</th></tr>
+      <tr><th>Conto</th><th>Saldo</th><th class="opt">In gioco</th><th>Disponibile</th><th class="opt">Profitto scommesse</th><th class="opt">Scommesse</th><th><span class="sr-only">Correggi</span></th></tr>
       ${list.map((a) => `<tr><td>${esc(a.name)}</td><td><strong>${money(a.balance)}</strong></td><td class="opt">${money(a.pending)}</td>
-        <td class="${a.available < -0.004 ? 'neg' : ''}">${money(a.available)}</td><td class="opt ${cls(a.profit)}">${signed(a.profit)}</td><td class="opt">${a.bets}</td></tr>`).join('')}
+        <td class="${a.available < -0.004 ? 'neg' : ''}">${money(a.available)}</td><td class="opt ${cls(a.profit)}">${signed(a.profit)}</td><td class="opt">${a.bets}</td>
+        <td style="width:1%">${a.name === NO_ACCOUNT ? '' : `<button class="icon-btn small-x" data-action="adjust-acc" data-name="${esc(a.name)}" aria-label="Correggi il saldo di ${esc(a.name)}" title="Correggi saldo">✎</button>`}</td></tr>`).join('')}
     </table></div>
-    ${unassigned && list.length > 1 ? `<div class="hint" style="margin-top:8px">Se un conto risulta negativo, registra il deposito su quel bookmaker o un trasferimento da "${NO_ACCOUNT}" verso di esso.</div>` : ''}
+    <div class="hint" style="margin-top:8px">Il saldo non torna con quello del bookmaker (bonus accreditati, arrotondamenti)? Tocca ✎ e scrivi il saldo reale: viene registrata una rettifica.${unassigned && list.length > 1 ? ` Se un conto risulta negativo, registra il deposito su quel bookmaker o un trasferimento da "${NO_ACCOUNT}" verso di esso.` : ''}</div>
   </div>`;
 }
 
@@ -1847,8 +1893,19 @@ const actions = {
   },
   'add-tx'() {
     const amount = num($('#txAmount').value);
-    if (!(amount > 0)) { alert('Inserisci un importo valido'); return; }
     const type = $('#txType').value;
+    if (type === 'adjust') {
+      if (!Number.isFinite(amount)) { alert('Inserisci il saldo reale del conto'); return; }
+      const book = $('#txBook').value.trim();
+      const diff = C.round2(amount - currentBalanceOf(book));
+      if (Math.abs(diff) < 0.005) { toast('Il saldo è già corretto'); return; }
+      store.upsert('transactions', { type, amount: diff, bookmaker: book, date: $('#txDate').value || today(),
+        note: $('#txNote').value.trim() || `saldo reale ${money(amount)}` });
+      ui.txBook = '';
+      toast(`Rettifica registrata: ${signed(diff)}`);
+      return;
+    }
+    if (!(amount > 0)) { alert('Inserisci un importo valido'); return; }
     const base = { type, amount: C.round2(amount), date: $('#txDate').value || today(), note: $('#txNote').value.trim() };
     if (type === 'transfer') {
       const from = $('#txFrom').value.trim(), to = $('#txTo').value.trim();
@@ -1856,6 +1913,12 @@ const actions = {
       store.upsert('transactions', { ...base, from, to });
     } else store.upsert('transactions', { ...base, bookmaker: $('#txBook').value.trim() });
     toast('Movimento registrato');
+  },
+  'adjust-acc'(el) {
+    ui.txType = 'adjust';
+    ui.txBook = el.dataset.name;
+    ui.focusTx = true;
+    render();
   },
   'del-tx'(el) {
     const t = store.get().transactions.find((x) => x.id === el.dataset.id);
