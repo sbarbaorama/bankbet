@@ -1,4 +1,5 @@
 {
+  "id": "/bankbet/?app=bankbet",
   "name": "BankBet – Gestione scommesse",
   "short_name": "BankBet",
   "description": "Registro scommesse, bankroll, Kelly e Masaniello",
@@ -30,6 +31,7 @@
   "share_target": {
     "action": "./",
     "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
     "params": {
       "title": "title",
       "text": "text",

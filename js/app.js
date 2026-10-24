@@ -1651,6 +1651,7 @@ function renderSettings() {
   view.innerHTML = `
     <div class="stack">
       <h2>Impostazioni</h2>
+      ${installCard()}
       <div class="grid grid-2">
         <div class="card stack">
           <h3>Gestione del rischio</h3>
@@ -1914,6 +1915,20 @@ const actions = {
     } else store.upsert('transactions', { ...base, bookmaker: $('#txBook').value.trim() });
     toast('Movimento registrato');
   },
+  async install() {
+    if (installEvt) {
+      const evt = installEvt;
+      installEvt = null;
+      evt.prompt();
+      try {
+        const { outcome } = await evt.userChoice;
+        if (outcome !== 'accepted') toast('Installazione annullata: puoi riprovare più tardi da qui');
+      } catch { /* niente */ }
+      render();
+    } else {
+      toast('Usa il menu del browser: “Installa app” o “Aggiungi a schermata Home”');
+    }
+  },
   'adjust-acc'(el) {
     ui.txType = 'adjust';
     ui.txBook = el.dataset.name;
@@ -2047,6 +2062,42 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && sync.getConfig().auto) runSync(false);
 });
 window.addEventListener('online', () => sync.getConfig().auto && runSync(false));
+
+// ---------- Installazione come app ----------
+// Chrome/Edge segnalano con "beforeinstallprompt" che l'app si può installare: lo teniamo da parte
+// e lo riproponiamo con il pulsante "Installa l'app" (stesso funzionamento del Ricettario).
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installEvt = e;
+  if (current() === 'settings') render();
+});
+window.addEventListener('appinstalled', () => {
+  installEvt = null;
+  toast('BankBet installata: la trovi tra le app del dispositivo');
+  if (current() === 'settings') render();
+});
+
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function installCard() {
+  if (isStandalone()) {
+    return '<div class="card"><h3>App</h3><p class="hint" style="margin:6px 0 0">✓ Stai usando BankBet installata come app.</p></div>';
+  }
+  const how = isIOS()
+    ? 'Su iPhone/iPad: apri BankBet in Safari, tocca Condividi (il quadrato con la freccia) → “Aggiungi alla schermata Home”.'
+    : 'Se il pulsante non apre la finestra di installazione: su Android menu ⋮ di Chrome → “Installa app” / “Aggiungi a schermata Home”; su PC l’icona di installazione nella barra degli indirizzi.';
+  return `<div class="card stack" style="gap:10px">
+    <h3>Installa come app</h3>
+    <p class="hint" style="margin:0">Con l’app installata BankBet si apre a schermo intero dall’icona, funziona offline e su Android compare nel menu “Condividi” per i segnali.</p>
+    <div class="row">
+      ${isIOS() ? '' : `<button class="btn primary" data-action="install">⬇ Installa l’app</button>`}
+      ${installEvt ? '<span class="hint">Pronta per l’installazione</span>' : ''}
+    </div>
+    <div class="hint">${how}</div>
+  </div>`;
+}
 
 // ---------- Aggiornamento dell'app ----------
 function showUpdateBanner() {
