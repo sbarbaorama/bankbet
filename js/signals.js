@@ -11,7 +11,7 @@ const numOrEmpty = (s) => {
 };
 const isoDate = (s) => (/^\d{4}-\d{2}-\d{2}/.test(String(s || '')) ? String(s).slice(0, 10) : '');
 
-export const SOURCES = { totalcorner: 'TotalCorner', betwin: 'Betwin', incolla: 'Testo incollato' };
+export const SOURCES = { totalcorner: 'TotalCorner', betwin: 'Betwin', basketbet: 'BasketBet', incolla: 'Testo incollato' };
 
 export function fromParams(params) {
   const g = (k) => params.get(k);
