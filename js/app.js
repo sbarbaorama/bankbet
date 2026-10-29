@@ -736,6 +736,7 @@ function legRow(l = {}) {
     <input data-leg="market" value="${esc(l.market || '')}" placeholder="Mercato" list="dlMarket" aria-label="Mercato">
     <input data-leg="selection" value="${esc(l.selection || '')}" placeholder="Selezione" aria-label="Selezione">
     <input data-leg="odds" value="${l.odds ? String(l.odds).replace('.', ',') : ''}" inputmode="decimal" placeholder="Quota" aria-label="Quota">
+    <input type="hidden" data-leg="ref" value="${esc(l.ref || '')}">
     <select data-leg="status" aria-label="Esito">${Object.entries(C.LEG_STATUSES).map(([k, t]) => `<option value="${k}" ${(l.status || 'pending') === k ? 'selected' : ''}>${t}</option>`).join('')}</select>
     <button type="button" class="btn small ghost" data-leg-del aria-label="Rimuovi selezione">✕</button>
   </div>`;
@@ -748,6 +749,7 @@ function readLegs(f) {
     selection: row.querySelector('[data-leg="selection"]').value.trim(),
     odds: num(row.querySelector('[data-leg="odds"]').value),
     status: row.querySelector('[data-leg="status"]').value,
+    ref: row.querySelector('[data-leg="ref"]')?.value || '',
   })).filter((l) => l.event || l.selection || l.odds > 0);
 }
 
@@ -834,7 +836,11 @@ function openBet(id, preset = {}) {
       toast('Scommessa eliminata', () => store.restore('bets', copy));
       return;
     }
-    const legs = fd.isMulti ? readLegs(dlgForm) : [];
+    // i campi scritti dalla VM sulle selezioni (quota di chiusura, risultato) restano dopo una modifica
+    const legs = (fd.isMulti ? readLegs(dlgForm) : []).map((l) => {
+      const old = (existing?.legs || []).find((o) => o.event === l.event && o.selection === l.selection);
+      return old ? { ...old, ...l, ref: l.ref || old.ref || '' } : l;
+    });
     if (fd.isMulti && (legs.length < 2 || legs.some((l) => !(l.odds > 1)))) { alert('Una multipla ha bisogno di almeno 2 selezioni, ognuna con quota > 1'); return false; }
     const odds = num(fd.odds), stake = num(fd.stake);
     if (!(odds > 1)) { alert('Inserisci una quota valida (> 1)'); return false; }
@@ -854,7 +860,7 @@ function openBet(id, preset = {}) {
         : (fd.status === 'won' || fd.status === 'half_won') && String(fd.payout || '').trim() !== '' && num(fd.payout) >= 0 ? C.round2(num(fd.payout)) : '',
       settledDate: fd.status === 'pending' ? '' : fd.settledDate || today(),
       tags: fd.tags.trim(), notes: fd.notes.trim(),
-      freebet: !!fd.freebet, legs, source: b.source || '',
+      freebet: !!fd.freebet, legs, source: b.source || '', ref: b.ref || '',
     };
     if (action === 'dup') {
       delete item.id; delete item.createdAt;

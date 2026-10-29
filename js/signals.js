@@ -3,6 +3,7 @@
 // Formato del link (tutti i parametri sono facoltativi):
 //   https://sbarbaorama.github.io/bankbet/#new?src=totalcorner&ev=Inter%20-%20Milan&comp=Serie%20A
 //     &sport=Calcio&mkt=Prossimo%20gol&sel=Inter&odds=1.85&prob=62.5&date=2026-10-19&tags=live&note=...&book=Snai
+//     &ref=tc:12345   riferimento della partita (bw:, tc:, bb:): serve alla VM per chiudere da sola la scommessa
 
 const clip = (s, n = 200) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const numOrEmpty = (s) => {
@@ -29,6 +30,7 @@ export function fromParams(params) {
     prob: prob > 0 && prob < 100 ? prob : '',
     tags: clip(g('tags'), 120),
     notes: clip(g('note'), 400),
+    ref: clip(g('ref'), 60),
   };
   const date = isoDate(g('date'));
   if (date) preset.date = date;
@@ -38,7 +40,7 @@ export function fromParams(params) {
     if (Array.isArray(raw)) {
       const legs = raw.slice(0, 20).map((l) => ({
         event: clip(l.e, 120), market: clip(l.m, 60), selection: clip(l.s, 80),
-        odds: numOrEmpty(l.o) > 1 ? numOrEmpty(l.o) : '', status: 'pending',
+        odds: numOrEmpty(l.o) > 1 ? numOrEmpty(l.o) : '', status: 'pending', ref: clip(l.r, 60),
       })).filter((l) => l.event || l.selection);
       if (legs.length >= 2) {
         preset.legs = legs;
