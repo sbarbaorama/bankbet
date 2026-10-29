@@ -34,7 +34,9 @@ Qualsiasi script può aprire BankBet con una scommessa precompilata usando un li
 https://sbarbaorama.github.io/bankbet/#new?src=totalcorner&ev=Inter%20-%20Milan&comp=Serie%20A&sport=Calcio&mkt=1X2&sel=1&odds=1.85&prob=58&date=2026-10-19&tags=live&note=...&book=Snai
 ```
 
-Per una multipla si aggiunge `legs`, un array JSON di selezioni `{"e": evento, "m": mercato, "s": scelta, "o": quota}` (almeno due): BankBet apre il modulo con *Multipla* attiva e la quota totale calcolata.
+`ref` è il riferimento della partita (`bw:<id>` Betwin, `tc:<id>` TotalCorner, `bb:<id>` BasketBet): BankBet lo conserva nella scommessa e la VM (betting_max, `core/esiti.py`) lo usa per scrivere da sola esito e quota di chiusura.
+
+Per una multipla si aggiunge `legs`, un array JSON di selezioni `{"e": evento, "m": mercato, "s": scelta, "o": quota, "r": riferimento}` (almeno due): BankBet apre il modulo con *Multipla* attiva e la quota totale calcolata.
 
 ## Dove stanno i dati
 
