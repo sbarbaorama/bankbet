@@ -3,6 +3,7 @@ import * as sync from './sync.js';
 import * as C from './calc.js';
 import * as S from './staking.js';
 import * as SG from './signals.js';
+import * as SGN from './segnali.js';
 import { lineChart, barChart, multiLineChart } from './chart.js';
 
 const $ = (s, el = document) => el.querySelector(s);
@@ -235,7 +236,10 @@ const ui = {
   calMonth: null,
 };
 
-const views = { home: renderHome, bets: renderBets, tools: renderTools, stats: renderStats, bankroll: renderBankroll, settings: renderSettings };
+const views = { home: renderHome, bets: renderBets, signals: renderSignals, tools: renderTools, stats: renderStats, bankroll: renderBankroll, settings: renderSettings };
+
+// Scheda Segnali (js/segnali.js): pronostici e stato della VM betting_max.
+function renderSignals() { SGN.render(view); }
 
 function current() {
   const v = location.hash.slice(1);
@@ -244,7 +248,10 @@ function current() {
 
 function render() {
   const name = current();
-  for (const a of $$('#tabs a')) a.classList.toggle('active', a.dataset.view === name);
+  // Strumenti stanno nelle Impostazioni: sulla barra resta acceso Impostazioni
+  const tab = name === 'tools' ? 'settings' : name;
+  for (const a of $$('#tabs a')) a.classList.toggle('active', a.dataset.view === tab);
+  if (name === 'signals') SGN.onShow(); else SGN.stopPolling();
   document.body.classList.toggle('on-home', name === 'home');
   const scroll = window.scrollY;
   const focusId = document.activeElement?.id;
@@ -1034,6 +1041,7 @@ function renderTools() {
   const group = groups.find((g) => g[2].some(([k]) => k === ui.toolTab)) || groups[0];
   view.innerHTML = `
     <div class="stack">
+      <a href="#settings" class="hint" style="text-decoration:none">← Impostazioni</a>
       <div class="spread"><h2>Strumenti</h2>
         <div class="seg" role="group" aria-label="Gruppo di strumenti">${groups.map(([k, l, items]) => `<button class="${group[0] === k ? 'on' : ''}" data-action="tool-tab" data-tab="${group[0] === k ? ui.toolTab : items[0][0]}" aria-pressed="${group[0] === k}">${l}</button>`).join('')}</div></div>
       <div class="tool-tabs" role="tablist">${group[2].map(([k, l]) => `<button role="tab" aria-selected="${ui.toolTab === k}" class="${ui.toolTab === k ? 'on' : ''}" data-action="tool-tab" data-tab="${k}">${l}</button>`).join('')}</div>
@@ -1649,6 +1657,13 @@ function currentBalanceOf(book) {
 // ---------- IMPOSTAZIONI ----------
 const GEAR = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 
+function toolsCard() {
+  const items = [['masaniello', 'Masaniello'], ['cycles', 'Cicli'], ['sim', 'Simulatore'], ['kelly', 'Kelly'], ['value', 'Valore'], ['surebet', 'Surebet']];
+  return `<div class="card stack"><h3>Strumenti</h3>
+    <div class="tool-links">${items.map(([k, l]) => `<a class="btn" href="#tools" data-action="tool-tab" data-tab="${k}">${l}</a>`).join('')}</div>
+    <div class="hint">Metodi (Masaniello, cicli, simulatore) e calcolatori (Kelly, valore, surebet).</div></div>`;
+}
+
 function renderSettings() {
   const d = store.get();
   const s = d.settings;
@@ -1658,6 +1673,7 @@ function renderSettings() {
     <div class="stack">
       <h2>Impostazioni</h2>
       ${installCard()}
+      ${toolsCard()}
       <div class="grid grid-2">
         <div class="card stack">
           <h3>Gestione del rischio</h3>
@@ -1806,6 +1822,7 @@ function importJSON(e) {
 
 // ---------- Azioni ----------
 const actions = {
+  ...SGN.actions,
   'init-bank'() {
     const v = num($('#initBank').value);
     if (!(v > 0)) { alert('Inserisci un importo valido'); return; }
@@ -2143,8 +2160,17 @@ window.addEventListener('resize', () => {
   }, 150);
 });
 
+SGN.init({
+  esc, fmtOdds, openSignal, getBets: () => { const d = store.get(); return d.bets.filter((b) => !d.deleted?.[b.id]); },
+  rerender: () => { if (current() === 'signals') render(); }, isActive: () => current() === 'signals',
+  setNavDot: (on) => $('#tabs a[data-view="signals"]')?.classList.toggle('has-new', on),
+});
 applyTheme();
 if (!handleIncoming()) render();
+if (current() !== 'signals') SGN.load();     // solo per il pallino dei segnali nuovi
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && current() !== 'signals') SGN.load();
+});
 updateSyncBtn();
 if (sync.getConfig().auto) runSync(false);
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
