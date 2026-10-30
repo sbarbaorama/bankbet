@@ -186,12 +186,11 @@ export function render(view) {
   const st = state.stato;
   const vmBad = st && (!st.ok || stale(st));
   const head = `
-    <div class="spread"><h2>Segnali</h2>
-      <span class="hint">${state.loading ? 'aggiorno…' : state.loaded ? `controllato ${ago(new Date(state.loaded).toISOString())}` : ''}
-        <button class="btn small ghost" data-action="sg-refresh" aria-label="Aggiorna adesso">Aggiorna</button></span></div>
     <div class="seg sg-tabs" role="tablist" aria-label="Sezione">
       ${[['feed', 'Feed'], ['rend', 'Rendimento'], ['vm', 'VM']].map(([k, l]) => `<button role="tab" aria-selected="${ui.sub === k}" class="${ui.sub === k ? 'on' : ''}" data-action="sg-sub" data-sub="${k}">${l}${k === 'vm' && vmBad ? ' <i class="sg-alert-dot" aria-label="problemi"></i>' : ''}</button>`).join('')}
     </div>`;
+  const foot = `<div class="sg-foot hint">${state.loading ? 'Aggiorno…' : state.loaded ? `Controllato ${ago(new Date(state.loaded).toISOString())}` : ''}
+    <button class="btn small ghost" data-action="sg-refresh">Aggiorna ora</button></div>`;
   let body;
   if (!sync.isConfigured(cfg)) {
     body = `<div class="card stack"><h3>Collega la VM</h3><p class="hint" style="margin:0">I pronostici arrivano dallo stesso repository GitHub privato della sincronizzazione. Configurala in <a href="#settings">Impostazioni → Sincronizzazione GitHub</a> e poi torna qui.</p></div>`;
@@ -202,7 +201,7 @@ export function render(view) {
     body = (state.error ? `<div class="alert">${esc(state.error)}</div>` : '') +
       (ui.sub === 'rend' ? renderRend() : ui.sub === 'vm' ? renderVm() : renderFeed());
   }
-  view.innerHTML = `<div class="stack sg">${head}${body}</div>`;
+  view.innerHTML = `<h2 class="sr-only">Segnali</h2><div class="stack sg">${head}${body}${sync.isConfigured(cfg) ? foot : ''}</div>`;
   updateDot();
 }
 
@@ -210,6 +209,8 @@ function projDot(k) {
   return `<i class="sg-dot" style="background:${PROJECTS[k]?.color || 'var(--muted)'}" aria-hidden="true"></i>`;
 }
 
+// Scelta di un segnale TotalCorner: da registrare (la vittoria, quella che giochi di solito, in
+// evidenza), già registrata (verde) o chiusa con l'esito.
 function choiceButton(item, c, k, bets) {
   const { esc } = deps;
   const reg = isRegistered(c, bets);
@@ -218,45 +219,69 @@ function choiceButton(item, c, k, bets) {
     return `<span class="sg-choice done ${e[1]}"><span>${esc(c.etichetta)}</span><small>${e[0]} ${e[2]}${reg ? ' · registrata' : ''}</small></span>`;
   }
   if (reg) return `<span class="sg-choice reg"><span>${esc(c.etichetta)}</span><small>✓ Registrata</small></span>`;
-  return `<button class="sg-choice" data-action="sg-reg" data-id="${esc(item.id)}" data-k="${k}"><span>${esc(c.etichetta)}</span><small>Registra</small></button>`;
+  const main = c.chiave === 'vittoria' || (c.chiave === 'over' && !item.scelte.some((x) => x.chiave === 'vittoria'));
+  return `<button class="sg-choice${main ? ' main' : ''}" data-action="sg-reg" data-id="${esc(item.id)}" data-k="${k}"><span>${esc(c.etichetta)}</span><small>Registra</small></button>`;
 }
 
+function itemHead(item, right, rightCls = '') {
+  const { esc } = deps;
+  const proj = PROJECTS[item.progetto] || { label: item.progetto };
+  const left = [proj.label, item.progetto === 'totalcorner' ? item.info : null, item.comp].filter(Boolean).map(esc).join(' · ');
+  return `<div class="sg-head"><span>${projDot(item.progetto)}${left}</span><span class="${rightCls}">${right}</span></div>`;
+}
+
+// Card di un pronostico ancora da giocare o in corso (live, in attesa).
 function itemCard(item, bets) {
   const { esc, fmtOdds } = deps;
-  const proj = PROJECTS[item.progetto] || { label: item.progetto };
-  const live = item.progetto === 'totalcorner' && item.acceso;
-  let when;
-  if (item.progetto === 'totalcorner') when = `${item.minuto ?? '–'}' ${esc(item.tempo || '')}`;
-  else when = hhmm(item.quando) || '';
-  const headLeft = [proj.label, item.progetto === 'totalcorner' ? item.info : null, item.comp].filter(Boolean).map(esc).join(' · ');
-  let sub = '';
-  let main = '';
   if (item.progetto === 'totalcorner') {
+    const live = item.acceso;
+    const score = item.risultato || (item.gol ? 'gol' : '0-0');
+    const right = `${esc(item.minuto ?? '–')}' ${esc(item.tempo || '')} · ${esc(score)}`;
     const bits = [];
+    if (!live && item.chiusura) bits.push(`segnale ${esc(item.chiusura)}`);
     if (item.gol) bits.push(`gol ${esc(item.gol.squadra)} al ${esc(item.gol.minuto)}'`);
-    if (item.risultato) bits.push(`finale ${esc(item.risultato)}`);
-    else if (!live && item.chiusura) bits.push(`segnale ${esc(item.chiusura)}`);
-    sub = bits.length ? `<div class="sg-sub">${bits.join(' · ')}</div>` : '';
-    main = `<div class="sg-choices">${item.scelte.map((c, k) => choiceButton(item, c, k, bets)).join('')}</div>`;
-  } else {
-    const c = item.scelte[0];
-    const quota = c.quota ? `<b class="sg-odds">@${fmtOdds(c.quota_agg || c.quota)}</b>${c.quota_agg ? ` <s class="muted" title="quota del mattino">${fmtOdds(c.quota)}</s>` : ''}` : '<span class="muted">quota da inserire</span>';
-    const what = item.tipo === 'bolletta' ? esc(c.etichetta) : `${esc(c.mercato)} · ${esc(c.selezione)}`;
-    const extra = [c.prob ? `prob ${String(c.prob).replace('.', ',')}%` : '', c.quota_agg_ora ? `quota agg. ${hhmm(c.quota_agg_ora)}` : '', item.risultato ? `finale ${esc(item.risultato)}` : ''].filter(Boolean).join(' · ');
-    const legs = item.selezioni ? `<ul class="sg-legs">${item.selezioni.map((s) => {
-      const e = ESITO[s.esito];
-      return `<li><span>${esc(hhmm(s.quando))}</span><span>${esc(s.evento)} · <b>${esc(s.selezione)}</b>${s.quota ? ` @${fmtOdds(s.quota)}` : ''}</span><span class="${e ? e[1] : 'muted'}">${e ? e[0] : '·'}${s.risultato ? ` ${esc(s.risultato)}` : ''}</span></li>`;
-    }).join('')}</ul>` : '';
-    const reg = isRegistered(c, bets);
-    const e = ESITO[c.esito];
-    const action = e ? `<span class="chip ${c.esito}">${e[0]} ${e[2]}</span>`
-      : reg ? '<span class="pill pos">✓ Registrata</span>'
-        : `<button class="btn small" data-action="sg-reg" data-id="${esc(item.id)}" data-k="0">Registra</button>`;
-    main = `<div class="sg-line"><div class="sg-what">${what} ${quota}${extra ? `<div class="hint">${extra}</div>` : ''}</div>${action}</div>${legs}`;
+    return `<article class="sg-card${live ? ' live' : ''}">
+      ${itemHead(item, right, 'sg-score')}
+      <div class="sg-title">${esc(item.evento)}</div>
+      ${bits.length ? `<div class="sg-sub">${bits.join(' · ')}</div>` : ''}
+      <div class="sg-choices">${item.scelte.map((c, k) => choiceButton(item, c, k, bets)).join('')}</div></article>`;
   }
-  return `<article class="card sg-item${live ? ' live' : ''}">
-    <div class="sg-head"><span>${projDot(item.progetto)}${headLeft}</span><span class="${live ? 'sg-live' : ''}">${live ? 'LIVE · ' : ''}${when}</span></div>
-    <div class="sg-title">${esc(item.evento)}</div>${sub}${main}</article>`;
+  const c = item.scelte[0];
+  const right = [hhmm(item.quando), c.quota_agg_ora ? `quota agg. ${hhmm(c.quota_agg_ora)}` : ''].filter(Boolean).join(' · ');
+  const odds = c.quota ? `<b class="sg-odds">@${fmtOdds(c.quota_agg || c.quota)}</b>${c.quota_agg ? ` <s class="sg-old" title="quota del mattino">${fmtOdds(c.quota)}</s>` : ''}` : '<span class="sg-old">quota da inserire</span>';
+  const what = item.tipo === 'bolletta' ? esc(c.etichetta) : `${esc(c.mercato)} · ${esc(c.selezione)}`;
+  const prob = c.prob ? ` · prob ${Math.round(c.prob)}%` : '';
+  const reg = isRegistered(c, bets);
+  const action = reg
+    ? '<span class="sg-reg-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg>Registrata</span>'
+    : `<button class="sg-reg-btn" data-action="sg-reg" data-id="${esc(item.id)}" data-k="0">Registra</button>`;
+  const legs = item.selezioni ? `<ul class="sg-legs">${item.selezioni.map((s) => {
+    const e = ESITO[s.esito];
+    return `<li><span>${esc(hhmm(s.quando))}</span><span>${esc(s.evento)} · <b>${esc(s.selezione)}</b>${s.quota ? ` @${fmtOdds(s.quota)}` : ''}</span><span class="${e ? e[1] : 'muted'}">${e ? e[0] : '·'}${s.risultato ? ` ${esc(s.risultato)}` : ''}</span></li>`;
+  }).join('')}</ul>` : '';
+  return `<article class="sg-card">
+    ${itemHead(item, right)}
+    <div class="sg-line"><div class="sg-main"><div class="sg-title">${esc(item.evento)}</div>
+      <div class="sg-what">${what} ${odds}${prob}</div></div>${action}</div>${legs}</article>`;
+}
+
+// Riga compatta di un pronostico chiuso (elenco "Chiusi").
+function closedRow(item, bets) {
+  const { esc, fmtOdds } = deps;
+  const c = item.scelte[0];
+  let detail;
+  let right;
+  if (item.progetto === 'totalcorner') {
+    detail = `TC ${item.scelte.length === 1 ? esc(item.scelte[0].etichetta) : `${item.scelte.length} scelte`}`;
+    right = `${item.scelte.map((x) => { const e = ESITO[x.esito]; return `<span class="${e ? e[1] : 'muted'}" title="${esc(x.etichetta)}">${e ? e[0] : '·'}</span>`; }).join(' ')}${item.risultato ? ` <span class="muted">${esc(item.risultato)}</span>` : ''}`;
+  } else {
+    const q = c.quota_agg || c.quota;
+    detail = `${item.tipo === 'bolletta' ? esc(c.etichetta) : esc(c.selezione)}${q ? ` @${fmtOdds(q)}` : ''}`;
+    const e = ESITO[c.esito];
+    right = e ? `<span class="${e[1]}">${e[0]}${item.risultato ? ` ${esc(item.risultato)}` : ` ${e[2]}`}</span>` : '<span class="muted">in attesa</span>';
+  }
+  const reg = item.scelte.some((x) => isRegistered(x, bets));
+  return `<div class="sg-row"><span class="sg-row-l">${projDot(item.progetto)}<b>${esc(item.evento)}</b> <span class="muted">· ${detail}</span>${reg ? ' <span class="sg-mine" title="registrata in BankBet">●</span>' : ''}</span><span class="sg-row-r">${right}</span></div>`;
 }
 
 function renderFeed() {
@@ -265,8 +290,7 @@ function renderFeed() {
   const counts = { all: items.length };
   for (const p of items) counts[p.progetto] = (counts[p.progetto] || 0) + 1;
   const sel = items.filter((p) => ui.filter === 'all' || p.progetto === ui.filter);
-  const now = localIso();
-  const today = now.slice(0, 10);
+  const today = localIso().slice(0, 10);
   const minDay = localIso(new Date(Date.now() - (ui.days - 1) * 864e5)).slice(0, 10);
   const live = sel.filter((p) => p.progetto === 'totalcorner' && p.acceso);
   const open = sel.filter((p) => !live.includes(p) && !decided(p) && (p.giorno >= today || (p.quando || '') >= localIso(new Date(Date.now() - 6 * 36e5))))
@@ -279,19 +303,20 @@ function renderFeed() {
     byDay.get(p.giorno).push(p);
   }
   const chips = [['all', 'Tutti'], ...Object.entries(PROJECTS).map(([k, v]) => [k, v.short])]
-    .map(([k, l]) => `<button class="sg-chip${ui.filter === k ? ' on' : ''}" data-action="sg-filter" data-f="${k}" aria-pressed="${ui.filter === k}">${l}${counts[k] ? ` <span>${counts[k]}</span>` : ''}</button>`).join('');
+    .map(([k, l]) => `<button class="sg-chip${ui.filter === k ? ' on' : ''}" data-action="sg-filter" data-f="${k}" aria-pressed="${ui.filter === k}">${l}${counts[k] ? ` ${counts[k]}` : ''}</button>`).join('');
+  const label = (l, r = '') => `<div class="sg-label"><span>${l}</span>${r ? `<span>${r}</span>` : ''}</div>`;
   let html = `<div class="sg-chips">${chips}</div>`;
-  if (live.length) html += `<div class="date-head">Live ora</div><div class="bet-list">${live.map((p) => itemCard(p, bets)).join('')}</div>`;
-  if (open.length) html += `<div class="date-head">In attesa · ${open.length}</div><div class="bet-list">${open.map((p) => itemCard(p, bets)).join('')}</div>`;
+  if (live.length) html += label('Live ora') + live.map((p) => itemCard(p, bets)).join('');
+  if (open.length) html += label(`Oggi · ${open.length} in attesa`) + open.map((p) => itemCard(p, bets)).join('');
   for (const [day, list] of byDay) {
     const choices = list.flatMap((p) => p.scelte).filter((c) => c.esito === 'won' || c.esito === 'lost');
     const ok = choices.filter((c) => c.esito === 'won').length;
-    html += `<div class="date-head spread"><span>${deps.esc(dayLabel(day))}</span><span>${choices.length ? `${ok} su ${choices.length} centrati` : ''}</span></div>
-      <div class="bet-list">${list.map((p) => itemCard(p, bets)).join('')}</div>`;
+    html += label(`Chiusi ${deps.esc(dayLabel(day).toLowerCase())}`, choices.length ? `${ok} su ${choices.length} centrati` : '') +
+      `<div class="sg-closed">${list.map((p) => closedRow(p, bets)).join('')}</div>`;
   }
   if (!live.length && !open.length && !byDay.size) html += '<div class="card hint">Nessun pronostico in questo periodo.</div>';
   if (items.some((p) => p.giorno < minDay)) html += '<button class="btn" data-action="sg-more">Mostra altri giorni</button>';
-  return html;
+  return `<div class="sg-feed">${html}</div>`;
 }
 
 function spark(series, color) {
