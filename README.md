@@ -19,7 +19,13 @@ Web app (PWA) per registrare scommesse e gestire il bankroll. Funziona su PC e s
   - *Esposizione massima*: limite opzionale alla somma delle puntate in corso.
 - **Simulatore Monte Carlo**: confronta le strategie (martingala compresa) sugli stessi esiti casuali: bankroll mediano, scenari peggiori e migliori, probabilità di chiudere in utile, rischio di rovina, drawdown.
 - **Segnali da Telegram**: i bot TotalCorner e Betwin aggiungono ai messaggi il link *Registra su BankBet*, che apre la nuova scommessa già compilata (partita, campionato, mercato, selezione, quota, probabilità, note); le bollette di Betwin arrivano come multipla con tutte le selezioni. In alternativa *Incolla segnale* legge il testo copiato da Telegram (anche più partite nello stesso messaggio) e, con l'app installata su Android, BankBet compare nel menu *Condividi*. La fonte resta sulla scommessa ed è analizzabile in Statistiche.
-- **Strumenti**: calcolatore Kelly, margine del bookmaker e quote eque, valore atteso (EV), surebet/dutching.
+- **Segnali** (scheda in basso): i pronostici di betting_max letti dalla VM, nello stesso repository della sincronizzazione (`pronostici.json` e `stato.json`, scritti dalla VM, mai dall'app).
+  - *Feed*: segnali TotalCorner live con le tre scelte (Over 0.5, vittoria, prossimo gol), pronostici Betwin e BasketBet in attesa (con la quota aggiornata dal pre-partita) e quelli chiusi giorno per giorno con l'esito. **Registra** apre la nuova scommessa già compilata; quelle già in BankBet (stesso riferimento e stessa scelta) compaiono come *Registrata*.
+  - *Rendimento*: per progetto e periodo (7, 30, 90 giorni, tutto), a 1 unità sulla quota segnalata: pronostici, centrati, ROI, CLV e grafico del profitto; per TotalCorner la % di centrati per scelta. Non sono le tue giocate: quelle restano in Statistiche.
+  - *VM*: problemi aperti, servizio, bot, quota API, risorse, database, backup e ultimi lavori.
+  
+  Con la scheda aperta si ricontrolla ogni minuto (GitHub risponde "non cambiato" finché la VM non pubblica). Un pallino sulla scheda segnala un segnale TotalCorner nuovo.
+- **Strumenti** (in Impostazioni): calcolatore Kelly, margine del bookmaker e quote eque, valore atteso (EV), surebet/dutching.
 - **Statistiche**: per periodo (30 giorni, 3 mesi, mese, anno, tutto); yield, ROI, win rate, drawdown massimo, serie, CLV e confronto tra profitto atteso e reale; profitto mensile; analisi per sport, competizione, mercato, bookmaker, strategia, fascia di quota, tag, giorno della settimana.
 - **Gestione del rischio**: stop-loss giornaliero e settimanale, stop-win giornaliero, obiettivo mensile.
 - **Aspetto**: tema scuro predefinito, chiaro o automatico, contrasti verificati (WCAG AA); spiegazione dei termini (i) toccando le etichette.

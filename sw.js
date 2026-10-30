@@ -1,12 +1,12 @@
 // Service worker: l'app funziona offline partendo dai file salvati (cache-first).
 // Ogni pubblicazione cambia CACHE: il nuovo service worker scarica i file aggiornati direttamente
 // dal server (senza passare dalla cache HTTP), si attiva subito e l'app mostra "Aggiorna".
-const CACHE = 'bankbet-v13';
+const CACHE = 'bankbet-v14';
 const FONTS = 'bankbet-fonts-v1';
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 const SHELL = [
   './', 'index.html', 'css/style.css', 'manifest.webmanifest',
-  'js/app.js', 'js/store.js', 'js/calc.js', 'js/sync.js', 'js/chart.js', 'js/staking.js', 'js/signals.js',
+  'js/app.js', 'js/store.js', 'js/calc.js', 'js/sync.js', 'js/chart.js', 'js/staking.js', 'js/signals.js', 'js/segnali.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png',
 ];
 
