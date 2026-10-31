@@ -285,7 +285,7 @@ export function bankrollSeries(bets, transactions) {
   for (const t of transactions) {
     if (t.type === 'transfer') continue;
     const d = t.type === 'withdrawal' ? -t.amount : +t.amount;
-    events.push({ date: t.date, delta: d, ev: d, kind: 'tx', order: t.createdAt || 0 });
+    events.push({ date: t.date, delta: d, ev: d, kind: 'tx', txType: t.type, order: t.createdAt || 0 });
   }
   for (const b of bets.filter(isSettled)) {
     const p = betProfit(b);
@@ -296,16 +296,17 @@ export function bankrollSeries(bets, transactions) {
   const perDay = new Map();
   for (const e of events) perDay.set(e.date, (perDay.get(e.date) || 0) + 1);
   const seen = new Map();
-  let bal = 0, evBal = 0, cumProfit = 0;
+  let bal = 0, evBal = 0, cumProfit = 0, evProfit = 0;
   const points = [];
   for (const e of events) {
     bal += e.delta;
     evBal += e.ev;
-    if (e.kind === 'bet') cumProfit += e.delta;
+    if (e.kind === 'bet') { cumProfit += e.delta; evProfit += e.ev; }
     const k = seen.get(e.date) || 0;
     seen.set(e.date, k + 1);
     const t = Date.parse(e.date + 'T00:00:00') + ((k + 1) * 864e5) / (perDay.get(e.date) + 1);
-    points.push({ date: e.date, t, value: bal, ev: evBal, profit: cumProfit });
+    points.push({ date: e.date, t, value: bal, ev: evBal, profit: cumProfit, evProfit, kind: e.kind,
+      tx: e.kind === 'tx' ? { delta: e.delta, type: e.txType } : null });
   }
   const { maxDrawdown, range } = maxDrawdownRange(points);
   return { points, maxDrawdown, ddRange: range };

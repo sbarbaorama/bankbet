@@ -18,6 +18,7 @@
   --neg: #FF8A7A;
   --warn: #F2B544;
   --ev: #8FB8FF;
+  --deposit: #B9A8FF;
   --pending: #8FB8FF;
   --heat-neg2: #E0614F;
   --heat-neg1: #6E352D;
@@ -52,6 +53,7 @@
   --neg: #B23B28;
   --warn: #9A5C00;
   --ev: #2F62C9;
+  --deposit: #5B47C7;
   --pending: #2F62C9;
   --heat-neg2: #B23B28;
   --heat-neg1: #F2C3BA;
@@ -68,7 +70,7 @@
     --bg: #F2F4EF; --surface: #FFFFFF; --surface-2: #EAEEE7; --surface-3: #F8FAF6; --border: #D7DED4; --border-2: #C6D0C2;
     --text: #0F1A14; --text-2: #2C3B32; --muted: #56675C; --faint: #687870; --grid: #E3E8E0;
     --accent: #9A5C00; --accent-text: #FFFFFF; --pos: #1B7A43; --pos-bg: #DDF1E4; --neg: #B23B28; --warn: #9A5C00;
-    --ev: #2F62C9; --pending: #2F62C9;
+    --ev: #2F62C9; --deposit: #5B47C7; --pending: #2F62C9;
     --heat-neg2: #B23B28; --heat-neg1: #F2C3BA; --heat-0: #EAEEE7; --heat-pos1: #A9DDBC; --heat-pos2: #22804A; --heat-ink-strong: #FFFFFF;
     --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6;
     --shadow: 0 1px 2px rgba(15, 26, 20, .05), 0 4px 14px rgba(15, 26, 20, .05);
@@ -612,3 +614,8 @@ button.sg-choice.main:hover { background: var(--accent); filter: brightness(1.06
 .sg-card .sg-head > span:last-child { font-family: var(--font); font-size: .78rem; font-weight: 400; color: var(--muted); }
 .sg-card .sg-head > span.sg-score { font-family: var(--font-num); font-weight: 700; font-size: 1.05rem; color: var(--accent); }
 .sg-choice.main small { color: var(--accent-text); }
+
+/* ---------- Grafico Home: vista Profitto/Bankroll e movimenti ---------- */
+.legend i.tx { height: 0; background: none; border-top: 2px dashed var(--deposit); }
+.chart-tip .x { color: var(--deposit); font-weight: 600; }
+@media (max-width: 640px) { .hero-tools .mode-seg { grid-template-columns: repeat(2, 1fr); } }

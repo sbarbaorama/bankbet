@@ -230,6 +230,7 @@ const ui = {
   sim: null,
   simResult: null,
   homePeriod: '30',
+  homeMode: (() => { try { return localStorage.getItem('bankbet.homeMode') || 'profit'; } catch { return 'profit'; } })(),
   txType: 'deposit',
   txBook: '',
   focusTx: false,
@@ -316,19 +317,34 @@ function renderHome() {
   const per = PERIODS.find((p) => p[0] === ui.homePeriod) || PERIODS[1];
   const from = per[2] ? daysAgo(per[2] - 1) : '';
 
+  // Vista "Profitto" (predefinita): solo le scommesse, i depositi non muovono la linea.
+  // Vista "Bankroll": il saldo, con depositi e prelievi disegnati come gradini tratteggiati.
+  const mode = ui.homeMode === 'bank' ? 'bank' : 'profit';
+  let base = series.points;
+  if (mode === 'profit') {
+    base = base.filter((p) => p.kind !== 'tx').map((p) => ({ ...p, value: p.profit, ev: p.evProfit, tx: null }));
+    if (series.points.length) base = [{ ...series.points[0], value: 0, ev: 0, profit: 0, tx: null, t: series.points[0].t - 1 }, ...base];
+  }
   // Serie nel periodo, con la linea attesa riallineata all'inizio del periodo.
-  let pts = series.points;
+  let pts = base;
   if (from) {
     const before = pts.filter((p) => p.date < from);
     const start = before[before.length - 1];
-    pts = (start ? [{ ...start, date: from, t: Date.parse(from + 'T00:00:00') }] : []).concat(pts.filter((p) => p.date >= from));
+    pts = (start ? [{ ...start, tx: null, date: from, t: Date.parse(from + 'T00:00:00') }] : []).concat(pts.filter((p) => p.date >= from));
   }
   if (pts.length) {
-    const off = pts[0].value - pts[0].ev;
-    pts = pts.map((p) => ({ ...p, ev: p.ev + off }));
+    if (mode === 'profit') {
+      // il profitto del periodo parte da zero
+      const v0 = pts[0].value, e0 = pts[0].ev;
+      pts = pts.map((p) => ({ ...p, value: p.value - v0, ev: p.ev - e0, profit: p.profit - v0 }));
+    } else {
+      const off = pts[0].value - pts[0].ev;
+      pts = pts.map((p) => ({ ...p, ev: p.ev + off }));
+    }
     const last = pts[pts.length - 1];
-    if (last.t < Date.now()) pts.push({ ...last, date: today(), t: Date.now() });
+    if (last.t < Date.now()) pts.push({ ...last, tx: null, date: today(), t: Date.now() });
   }
+  const txCount = mode === 'bank' ? pts.filter((p) => p.tx).length : 0;
   const dd = C.maxDrawdownRange(pts);
   const windowBets = d.bets.filter((x) => C.isSettled(x) && (!from || (x.settledDate || x.date) >= from));
   const lk = C.luck(windowBets);
@@ -368,15 +384,17 @@ function renderHome() {
               </div>
             </div>
             <div class="hero-tools">
+              <div class="seg mode-seg" role="group" aria-label="Cosa mostra il grafico">${[['profit', 'Profitto'], ['bank', 'Bankroll']].map(([k, l]) => `<button class="${k === mode ? 'on' : ''}" data-action="home-mode" data-mode="${k}" aria-pressed="${k === mode}">${l}</button>`).join('')}</div>
               <div class="seg" role="group" aria-label="Periodo">${PERIODS.map(([k, l]) => `<button class="${k === per[0] ? 'on' : ''}" data-action="home-period" data-period="${k}" aria-pressed="${k === per[0]}">${l}</button>`).join('')}</div>
               <div class="legend">
-                <span><i></i>Bankroll reale</span>
+                <span><i></i>${mode === 'profit' ? 'Profitto delle scommesse' : 'Bankroll'}</span>
+                ${txCount ? '<span><i class="tx"></i>Depositi e prelievi</span>' : ''}
                 ${hasEst ? '<span><i class="ev"></i>Atteso (EV)</span>' : ''}
                 ${dd.range ? '<span><i class="dd"></i>Drawdown max</span>' : ''}
               </div>
             </div>
           </div>
-          <div class="chart-wrap"><canvas class="chart" id="chBank" role="img" aria-label="Andamento del bankroll nel periodo selezionato"></canvas></div>
+          <div class="chart-wrap"><canvas class="chart" id="chBank" role="img" aria-label="${mode === 'profit' ? 'Profitto delle scommesse nel periodo selezionato, senza depositi e prelievi' : 'Andamento del bankroll nel periodo selezionato, con depositi e prelievi evidenziati'}"></canvas></div>
           <div class="hero-foot">
             <div><div class="label-caps">Disponibile${info('available')}</div><div class="v">${money(b.available)}</div></div>
             <div><div class="label-caps">In gioco${info('pending')}</div><div class="v">${money(b.pendingStake)} <small class="muted">· ${pending.length} ${pending.length === 1 ? 'giocata' : 'giocate'}</small></div></div>
@@ -412,8 +430,12 @@ function renderHome() {
     </div>`;
 
   lineChart($('#chBank'), pts, {
-    emptyText: 'Nessun movimento nel periodo',
-    fmtValue: money,
+    emptyText: mode === 'profit' ? 'Nessuna scommessa chiusa nel periodo' : 'Nessun movimento nel periodo',
+    fmtValue: mode === 'profit' ? signed : money,
+    fmtTx: (tx) => {
+      const name = { deposit: 'Deposito', withdrawal: 'Prelievo', bonus: 'Bonus', adjust: 'Rettifica' }[tx.type] || 'Movimento';
+      return `${tx.delta >= 0 ? '⬆' : '⬇'} ${name} ${signed(tx.delta)}`;
+    },
     ddRange: dd.maxDrawdown > 0 ? dd.range : null,
     fmtDate: (t) => new Date(t).toLocaleDateString('it-IT', per[2] > 90 || !per[2] ? { month: 'short', year: '2-digit' } : { day: 'numeric', month: 'short' }),
   });
@@ -1833,6 +1855,11 @@ const actions = {
   settle(el) { settleBet(el.dataset.id, el.dataset.status); },
   'more-bets'() { ui.betLimit += 100; render(); },
   'home-period'(el) { ui.homePeriod = el.dataset.period; render(); },
+  'home-mode'(el) {
+    ui.homeMode = el.dataset.mode;
+    try { localStorage.setItem('bankbet.homeMode', ui.homeMode); } catch { /* niente */ }
+    render();
+  },
   'cal-move'(el) {
     const [y, m] = (ui.calMonth || today().slice(0, 7)).split('-').map(Number);
     const d = new Date(y, m - 1 + +el.dataset.step, 1);

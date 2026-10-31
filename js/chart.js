@@ -175,13 +175,66 @@ function drawLine(canvas, hoverX) {
     ctx.setLineDash([]);
   }
 
-  // Linea reale
-  path('value');
+  // Linea reale: i tratti dovuti a depositi/prelievi (p.tx) non fanno parte della linea delle scommesse,
+  // vengono disegnati a parte come gradino tratteggiato con etichetta.
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    if (i && !p.tx) ctx.lineTo(x(p.t), y(p.value)); else ctx.moveTo(x(p.t), y(p.value));
+  });
   ctx.strokeStyle = accent;
   ctx.lineWidth = 2.5;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.stroke();
+
+  const steps = points.map((p, i) => (i && p.tx ? { prev: points[i - 1], p } : null)).filter(Boolean);
+  if (steps.length) {
+    const dep = color('--deposit') || color('--ev');
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = dep;
+    ctx.lineWidth = 2.5;
+    for (const { prev, p } of steps) {
+      ctx.beginPath();
+      ctx.moveTo(x(prev.t), y(prev.value));
+      ctx.lineTo(x(prev.t), y(p.value));
+      ctx.lineTo(x(p.t), y(p.value));
+      ctx.stroke();
+    }
+    ctx.restore();
+    // Etichette solo dove c'è spazio: con troppi movimenti, o se due etichette dalla stessa parte
+    // (sopra per i depositi, sotto per i prelievi) si sovrapporrebbero, resta solo il pallino.
+    const label = opts.fmtTx || ((tx) => (tx.delta >= 0 ? '+' : '') + tx.delta.toFixed(2));
+    ctx.font = `600 11.5px ${FONT}`;
+    const showLabels = steps.length <= (compact ? 3 : 6);
+    const placed = [];
+    for (const { prev, p } of steps) {
+      const sx = x(prev.t), sy = y(p.value), up = p.tx.delta >= 0;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 4, 0, Math.PI * 2);
+      ctx.fillStyle = dep;
+      ctx.fill();
+      if (!showLabels) continue;
+      const text = label(p.tx);
+      const tw = ctx.measureText(text).width + 18;
+      const bx = Math.min(Math.max(sx - tw / 2, pad.l), w - pad.r - tw);
+      const by = up ? Math.max(pad.t, sy - 30) : Math.min(h - pad.b - 22, sy + 10);
+      if (placed.some((r) => bx < r.x + r.w + 4 && r.x < bx + tw + 4 && by < r.y + 24 && r.y < by + 24)) continue;
+      placed.push({ x: bx, y: by, w: tw });
+      ctx.font = `600 11.5px ${FONT}`;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bx, by, tw, 20, 10); else ctx.rect(bx, by, tw, 20);
+      ctx.fillStyle = color('--bg');
+      ctx.fill();
+      ctx.strokeStyle = dep;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = dep;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, bx + tw / 2, by + 10.5);
+    }
+  }
 
   const dot = (p, r) => {
     ctx.beginPath();
@@ -225,7 +278,8 @@ function drawLine(canvas, hoverX) {
 
   const fv = opts.fmtValue || ((v) => v.toFixed(2));
   const fd = opts.fmtTipDate || ((t) => new Date(t).toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'long' }));
-  tip.innerHTML = `<div class="d">${fd(p.t)}</div><b>${fv(p.value)}</b>${hasEv && p.ev != null ? `<div class="e">atteso ${fv(p.ev)}</div>` : ''}`;
+  const txLine = p.tx ? `<div class="x">${(opts.fmtTx || ((tx) => tx.delta.toFixed(2)))(p.tx)}</div>` : '';
+  tip.innerHTML = `<div class="d">${fd(p.t)}</div><b>${fv(p.value)}</b>${txLine}${hasEv && p.ev != null && !p.tx ? `<div class="e">atteso ${fv(p.ev)}</div>` : ''}`;
   tip.hidden = false;
   const half = tip.offsetWidth / 2;
   tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
