@@ -59,6 +59,25 @@ function emptyMsg(ctx, w, h, color, text) {
   ctx.fillText(text, w / 2, h / 2);
 }
 
+// Posiziona il riquadro accanto al punto (px, py) senza coprirlo: in diagonale, sul lato
+// dove c'è più spazio (destra/sinistra) e sopra o sotto il punto a seconda di dove passa la linea.
+// Con side=true resta di fianco alla linea verticale, utile quando i punti sono più d'uno.
+function placeTip(tip, px, py, w, h, side = false, hw = 0) {
+  const tw = tip.offsetWidth, th = tip.offsetHeight, gap = 14;
+  const right = px + hw + gap + tw <= w - 2 && (px < w * 0.6 || px - hw - gap - tw < 2);
+  let left = right ? px + hw + gap : px - hw - gap - tw;
+  left = Math.min(Math.max(2, left), w - tw - 2);
+  let top;
+  if (side) top = Math.min(Math.max(2, py - th / 2), h - th - 2);
+  else {
+    const above = py - gap - th >= 2 && (py > h * 0.45 || py + gap + th > h - 2);
+    top = above ? py - gap - th : py + gap;
+    top = Math.min(Math.max(2, top), h - th - 2);
+  }
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(top)}px`;
+}
+
 function tipEl(canvas) {
   const wrap = canvas.parentElement;
   let tip = wrap.querySelector(':scope > .chart-tip');
@@ -281,8 +300,7 @@ function drawLine(canvas, hoverX) {
   const txLine = p.tx ? `<div class="x">${(opts.fmtTx || ((tx) => tx.delta.toFixed(2)))(p.tx)}</div>` : '';
   tip.innerHTML = `<div class="d">${fd(p.t)}</div><b>${fv(p.value)}</b>${txLine}${hasEv && p.ev != null && !p.tx ? `<div class="e">atteso ${fv(p.ev)}</div>` : ''}`;
   tip.hidden = false;
-  const half = tip.offsetWidth / 2;
-  tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
+  placeTip(tip, px, y(p.value), w, h);
 }
 
 export function barChart(canvas, bars, opts = {}) {
@@ -351,8 +369,15 @@ function drawBars(canvas, hoverX) {
   tip.innerHTML = `<div class="d">${fl(b.label)}</div><b class="${b.value >= 0 ? 'pos' : 'neg'}">${fv(b.value)}</b>`;
   tip.hidden = false;
   const cx = pad.l + slot * hover + slot / 2;
-  const half = tip.offsetWidth / 2;
-  tip.style.left = `${Math.min(Math.max(cx, half + 2), w - half - 2)}px`;
+  // nella colonna del mese, nello spazio libero sopra o sotto la barra: così non copre nessuna barra
+  const th = tip.offsetHeight, tw = tip.offsetWidth, g = 8, y0 = y(0), yv = y(b.value);
+  const hi = Math.min(y0, yv), lo = Math.max(y0, yv);
+  const tops = b.value >= 0 ? [hi - g - th, lo + g] : [lo + g, hi - g - th];
+  const top = tops.find((t) => t >= 2 && t + th <= h - pad.b + 2);
+  if (top != null) {
+    tip.style.left = `${Math.round(Math.min(Math.max(2, cx - tw / 2), w - tw - 2))}px`;
+    tip.style.top = `${Math.round(top)}px`;
+  } else placeTip(tip, cx, hi, w, h, false, bw / 2);
 }
 
 /**
@@ -436,6 +461,6 @@ function drawMulti(canvas, hoverX) {
   tip.innerHTML = `<div class="d">${fx(ref[best].x)}</div>` + rows.map((r) =>
     `<div style="display:flex;align-items:center;gap:6px;justify-content:space-between"><span style="display:inline-flex;align-items:center;gap:6px"><i style="width:10px;height:3px;border-radius:2px;background:${r.s.color};display:inline-block"></i>${r.s.name}</span><strong style="font-family:var(--font-num);font-size:1rem">${fv(r.v)}</strong></div>`).join('');
   tip.hidden = false;
-  const half = tip.offsetWidth / 2;
-  tip.style.left = `${Math.min(Math.max(px, half + 2), w - half - 2)}px`;
+  const rys = rows.map((r) => y(r.v));
+  placeTip(tip, px, (Math.min(...rys) + Math.max(...rys)) / 2, w, h, true);
 }
